@@ -101,7 +101,10 @@
   const IS_TOUCH = (navigator.maxTouchPoints || 0) > 1 ||
     !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
 
-  let settings = { q: 2, vol: 0.55, sfx: true, theme: 'woodshop', wall: 1 };
+  /* cam：镜头模式。1 = 自动聚焦（开工时镜头推到设备前，原来的行为）
+                  0 = 手动（镜头完全交给玩家，开工只播动画、不碰相机）
+     用数字而不是布尔，和 wall 的写法保持一致，也方便以后加第三种。 */
+  let settings = { q: 2, vol: 0.55, sfx: true, theme: 'woodshop', wall: 1, cam: 1 };
 
   function loadSettings() {
     try {
@@ -4585,6 +4588,10 @@
   }
 
   function startFocus(id, ms) {
+    /* 手动镜头：玩家在设置里选了"手动"，就绝不碰相机。
+       动画（卡盘转、焊弧闪、CNC 走刀…）照常播，只是视角留给玩家自己。
+       这一条必须放在最前面 —— 连 focusPreset 都不该算。 */
+    if (settings.cam === 0) { if (focus) cancelFocus(); return; }
     const to = focusPreset(id);
     if (!to) return;
     const now = performance.now();
@@ -5293,6 +5300,12 @@
       '<div class="rowline"><span class="lb">外墙</span><span class="vl">' +
       '<button class="seg' + (settings.wall !== 0 ? ' on' : '') + '" data-wall="1">透明</button>' +
       '<button class="seg' + (settings.wall === 0 ? ' on' : '') + '" data-wall="0">实体</button></span></div>' +
+      '<div class="rowline"><span class="lb">镜头</span><span class="vl">' +
+      '<button class="seg' + (settings.cam !== 0 ? ' on' : '') + '" data-cam="1">自动聚焦</button>' +
+      '<button class="seg' + (settings.cam === 0 ? ' on' : '') + '" data-cam="0">手动</button></span></div>' +
+      '<div style="margin-top:-2px;margin-bottom:6px;font-size:10.5px;color:#5a6a7d;line-height:1.6">' +
+      '自动聚焦：开工时镜头自动推到正在干活的那台设备前。' +
+      '手动：镜头完全由你控制，开工只播设备动画，绝不移动视角。</div>' +
       '<div class="rowline"><span class="lb">窗口</span><span class="vl"><button class="seg" data-full="1">全屏 / 还原</button></span></div>' +
       '<div class="menu" style="margin-top:20px">' +
       '<button class="menu-btn" data-shell="back"><span class="idx">←</span>返回</button></div>' +
@@ -5486,6 +5499,14 @@
       if (t.dataset.q) { settings.q = +t.dataset.q; saveSettings(); applyQuality(); shellSettings(); return; }
       if (t.dataset.sfx) { settings.sfx = t.dataset.sfx === '1'; saveSettings(); SFX.apply(); shellSettings(); return; }
       if (t.dataset.wall !== undefined) { settings.wall = t.dataset.wall === '1' ? 1 : 0; saveSettings(); applyWalls(); shellSettings(); return; }
+      if (t.dataset.cam !== undefined) {
+        settings.cam = t.dataset.cam === '1' ? 1 : 0;
+        saveSettings();
+        // 正在自动聚焦时切到手动：立刻把镜头还给玩家（走 520ms 回程，不会突跳）
+        if (settings.cam === 0 && focus) cancelFocus();
+        shellSettings();
+        return;
+      }
       if (t.dataset.full) { toggleFull(); return; }
       const s = t.dataset.shell;
       if (s === 'new') shellNew();
@@ -5563,6 +5584,42 @@
       document.head.appendChild(st);
     }
     if (H.indexOf('#ui') === 0) setTimeout(() => shellSettings(), 500);
+    /* #devuiprobe：把设置面板真的渲染出来，检查「镜头」这一行是否出现、默认选哪一项，
+       再点一下「手动」看是否切换成功并写进 localStorage。
+       截图在软件渲染下太慢（整页合成超时），所以走 DOM + title 汇报。 */
+    if (H.indexOf('#devuiprobe') === 0) {
+      const read = () => {
+        const bs = document.querySelectorAll('[data-cam]');
+        const on = document.querySelector('[data-cam].on');
+        return 'n=' + bs.length + ' on=' + (on ? on.getAttribute('data-cam') : 'none') +
+               ' lbl=' + Array.from(bs).map((b) => b.textContent).join('/');
+      };
+      const saved = () => {
+        try {
+          const k = Object.keys(localStorage).filter((x) => /setting/i.test(x))[0];
+          const v = k ? JSON.parse(localStorage.getItem(k)) : null;
+          return (v && v.cam !== undefined) ? String(v.cam) : 'none';
+        } catch (e) { return 'err'; }
+      };
+      let before = '', lsBefore = '', camBefore = 0;
+      const dump = (tag) => {
+        const d = document.createElement('div');
+        d.id = 'uiprobe' + tag;
+        d.textContent = 'UIPROBE' + tag + '[' + read() + ' cam=' + settings.cam + ' ls=' + saved() + ']';
+        document.body.appendChild(d);
+      };
+      setTimeout(() => { try { shellSettings(); } catch (e) {} }, 600);
+      setTimeout(() => {
+        try { before = read(); lsBefore = saved(); camBefore = settings.cam; } catch (e) {}
+        try { dump('A'); } catch (e) {}
+      }, 900);
+      setTimeout(() => {
+        try { const b = document.querySelector('[data-cam="0"]'); if (b) b.click(); } catch (e) {
+          try { const d = document.createElement('div'); d.id = 'uiprobeERR'; d.textContent = 'UIPROBEERR ' + e.message; document.body.appendChild(d); } catch (e2) {}
+        }
+      }, 1050);
+      setTimeout(() => { try { dump('B'); } catch (e) {} }, 1250);
+    }
     // #dev5：满设备满技能、固定机位不旋转 —— 用于对比车间风格
     if (H.indexOf('#dev5') === 0) {
       startGame(1, true);
@@ -5778,7 +5835,13 @@
       state.cash = 99999999;
       syncEquipMeshes(); renderAll();
       let phase = 0;
+      const manual = H.indexOf('manual') >= 0;      // #devrealmanual：验证"手动镜头"不碰相机
+      if (manual) { settings.cam = 0; }
+      let p0 = null, moved = -1;
+      const seen = new Set();                       // 累计"曾经在播"的动画，避免末尾采样漏掉
+      let peak = 0;                                 // 相机离原位最远跑过多少（焦点时刻采样会漏）
       setTimeout(() => {
+        p0 = { x: camera.position.x, y: camera.position.y, z: camera.position.z };
         setTab('works');
         const btn = document.querySelector('[data-act="part"]');
         if (btn) btn.click();                        // 走真实的点击 → buildPart → animEquipList → startFocus
@@ -5818,6 +5881,12 @@
           ' T=' + (camTarget ? camTarget.x.toFixed(1) + '/' + camTarget.y.toFixed(1) + '/' + camTarget.z.toFixed(1) : 'null') +
           ' modal=' + (mb && mb.classList.contains('on')) +
           ' shell=' + (sb && !sb.classList.contains('hide')) +
+          ' MODE=' + (manual ? 'manual' : 'auto') +
+          ' PEAK=' + (p0 ? (peak = Math.max(peak, Math.hypot(camera.position.x - p0.x, camera.position.y - p0.y, camera.position.z - p0.z))) && peak.toFixed(2) : 'NA') +
+          ' NOW=' + (p0 ? Math.hypot(camera.position.x - p0.x, camera.position.y - p0.y, camera.position.z - p0.z).toFixed(2) : 'NA') +
+          ' ANIM=' + (['drill', 'lathe', 'weld', 'scope', 'cnc', 'cab', 'cad']
+            .filter((k) => { if (anim[k] > performance.now()) { seen.add(k); return true; } return false; })
+            .join('/') || '-') + ' SEEN=' + [...seen].join('/') +
           ' SKEW=' + (clock.getElapsedTime() * 1000 - performance.now()).toFixed(1) +
           ' SAN=' + (window.__SANITY || 0) +
           ' FZ[' + (window.__FZ || '-') + ']' +
