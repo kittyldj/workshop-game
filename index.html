@@ -4088,17 +4088,21 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   let focusLightPin = false;      // 调试入口用来强制点亮补光（复现实战亮度）
   const _fdir = new T.Vector3();  // 复用的视线方向，避免每帧 new 造成 GC 抖动
 
-  function renderFrame(t) {
+  /* ⚠️ 时间基准：本函数只接受**毫秒**（performance.now() / clock.getElapsedTime()*1000）。
+     内部再换算成秒 t 供程序化动画（正弦相位之类）使用。
+     混用两套时钟曾导致相机被外插到 3541 米外，见 animate() 里的注释。 */
+  function renderFrame(tMs) {
+    const t = tMs / 1000;                       // 秒：只给程序化动画用
     const dt = Math.min(0.05, lastT ? Math.max(0.001, t - lastT) : 0.016);
     lastT = t;
     // 自动缓慢环绕
     if (autoSpin && performance.now() - lastInteract > 6000 && !focus) camTheta += 0.00075;
     // 干活自动聚焦：推近 → 停留 → 退回
-    if (focus) updateFocus(t);
+    if (focus) updateFocus(tMs);
 
     // 聚焦被玩家打断后的回家过渡：靶点搬回房间中心、半径拉回全景、角度转正到通视方向
     if (camHome) {
-      const u = clamp((t - camHome.t0) / 520, 0, 1), e = easeIO(u);
+      const u = clamp((tMs - camHome.t0) / 520, 0, 1), e = easeIO(u);
       camTarget = {
         x: camHome.t.x + (camHome.home.x - camHome.t.x) * e,
         y: camHome.t.y + (camHome.home.y - camHome.t.y) * e,
@@ -4148,16 +4152,38 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       }
     }
     /* 最后一道闸：机位算歪了（设备模型以后改大、或者某台设备挤在一起）也不能让玩家
-       对着铁皮。三道判据 —— 落在设备盒里 / 贴上墙 / **视线穿过别台设备或墙体**
-       —— 任一条成立就立刻取消聚焦退回全景。 */
+       对着铁皮。三道判据 —— 落在设备盒里 / 贴上墙 / **视线穿过别台设备或墙体**。
+       ⚠️ 只在"到位停留"这一段体检。飞行段（flyIn 850ms、回程 flyBack 900ms）相机
+       本来就在穿墙穿设备地飞过去，那是正常的过渡帧；以前在这里无条件判遮挡，
+       等于每次回程都自我取消 —— 玩家看到的就是"干完活弹一句被挡住、镜头被打断"。
+       终点机位由 focusPreset 保证合法，所以只需要在到位后确认一次。 */
     if (focus && focus.to) {
+      const el = tMs - focus.t0;
+      const settled = el >= focus.flyIn - 16 && el <= focus.flyIn + focus.hold;
+      if (settled) {
+        const p = camera.position;
+        const nearWall = p.x < ROOM_BOX.x0 + 0.20 || p.x > ROOM_BOX.x1 - 0.20 ||
+                         p.z < ROOM_BOX.z0 + 0.20 || p.z > ROOM_BOX.z1 - 0.20;
+        const blind = equipBlocks(p, focus.to.t, focus.id) || wallBlocks(p, focus.to.t);
+        if (nearWall || blind || inAnyEquipBox(p.x, p.y, p.z)) {
+          cancelFocus();
+          toast('镜头被挡住了，已退回全景', 'bad');
+        }
+      }
+    }
+    /* ★ 最终保险：相机跑到"房间附近"以外，一定是某个数算爆了（历史上就是
+       秒/毫秒混用把靶点外插到 4 公里外）。这里不看任何几何假设，只看结果：
+       位置一旦离谱，立刻清掉聚焦与过渡、硬复位到全景机位。
+       有这一条，"整屏什么都没有且转不回来"这类事故就不可能再持续下一帧。 */
+    {
       const p = camera.position;
-      const nearWall = p.x < ROOM_BOX.x0 + 0.20 || p.x > ROOM_BOX.x1 - 0.20 ||
-                       p.z < ROOM_BOX.z0 + 0.20 || p.z > ROOM_BOX.z1 - 0.20;
-      const blind = equipBlocks(p, focus.to.t, focus.id) || wallBlocks(p, focus.to.t);
-      if (nearWall || blind || inAnyEquipBox(p.x, p.y, p.z)) {
-        cancelFocus();
-        toast('镜头被挡住了，已退回全景', 'bad');
+      if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z) ||
+          Math.abs(p.x) > 40 || Math.abs(p.z) > 40 || p.y > 25 || p.y < -6) {
+        focus = null; camHome = null;
+        camTheta = CAM_WOOD.theta; camPhi = CAM_WOOD.phi; camRadius = CAM_WOOD.r;
+        camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
+        window.__SANITY = (window.__SANITY || 0) + 1;
+        place();
       }
     }
     camera.lookAt(LT.x, LT.y, LT.z);
@@ -4484,6 +4510,43 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     compMat.uniforms.tB3.value = bloomRT[2].texture;
     compMat.uniforms.uTime.value = t;
     blit(compMat, null);
+
+    blackoutGuard();       // 最后一道、也是唯一不看几何判据的兜底：真黑了就复位
+  }
+
+  /* ============================================================
+     画面级自检（黑屏兜底）
+     几何判据再怎么补都会有漏：工作台、货架、地面、某个模型的内部、
+     甚至我没列进来的装饰物，都可能糊住镜头。与其一个个补判据，
+     不如直接看**结果** —— 读屏幕正中 16×16 的平均亮度，连续 8 帧几乎全黑
+     就认定相机钻进实体了，直接把镜头复位到默认全景。
+     这是唯一不依赖任何几何假设的保险，宁可偶尔误复位一次（能看），
+     也不要让玩家卡在一块黑屏前出不来。
+     ============================================================ */
+  let darkN = 0;
+  let blackPix = null;
+  function blackoutGuard() {
+    if (!renderer || !scene || !state || !state.started) return;
+    const gl = renderer.getContext();
+    if (!gl) return;
+    const S = 16;
+    const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+    if (w < 64 || h < 64) return;
+    if (!blackPix) blackPix = new Uint8Array(S * S * 4);
+    gl.readPixels((w - S) >> 1, (h - S) >> 1, S, S, gl.RGBA, gl.UNSIGNED_BYTE, blackPix);
+    let sum = 0;
+    for (let i = 0; i < blackPix.length; i += 4) sum += blackPix[i] + blackPix[i + 1] + blackPix[i + 2];
+    const avg = sum / (S * S * 3);
+    const TH = window.__DKTH || 6;                 // 调试可临时调高阈值，用来验证触发路径
+    if (avg < TH) darkN++; else darkN = 0;
+    window.__DK = avg; window.__DKN = darkN; window.__DKTHV = TH;  // 调试探针
+    if (darkN >= 3) {                              // 连续 3 帧全黑 → 复位
+      darkN = 0;
+      focus = null; camHome = null;
+      camTheta = CAM_WOOD.theta; camPhi = CAM_WOOD.phi; camRadius = CAM_WOOD.r;
+      camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
+      if (typeof toast === 'function') toast('画面被遮住了，已复位视角', 'bad');
+    }
   }
 
   function applyQuality() {
@@ -4600,14 +4663,21 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   // 截图/自检模式：渲染固定帧数后停住，避免软件渲染下长时间空转
-  const SHOT_MAX = location.hash.indexOf('shot') >= 0 ? 14 : -1;
+  // devblack 要多跑几十帧：页面加载期 state 还没建，前十几帧的检测会直接返回
+  const SHOT_MAX = location.hash.indexOf('shot') >= 0
+    ? (location.hash.indexOf('devblack') >= 0 ? 70 : 14) : -1;
   let shotFrames = 0;
 
   function animate() {
     const stop = SHOT_MAX > 0 && shotFrames >= SHOT_MAX;
     if (!stop) requestAnimationFrame(animate);
-    const t = clock.getElapsedTime();
-    renderFrame(t);
+    /* ⚠️ 必须传**毫秒**。这里以前传的是 clock.getElapsedTime()，那是"秒"，
+       而 renderFrame 内部所有相机计时（focus.t0 / camHome.t0）都用
+       performance.now()（毫秒）。两套时钟相减恒为 −27000 上下，
+       负值喂进 easeIO() 被平方放大成 2000 多倍 —— 相机被外插到 3.5 公里外
+       并永久卡死，玩家看到的就是"一开工画面就被遮住、怎么转都回不来"。
+       现在统一：全工程只用毫秒，renderFrame 内部自己换算成秒给动画用。 */
+    renderFrame(clock.getElapsedTime() * 1000);
     shotFrames++;
     // 同一帧内导出画布，绕开 headless 合成时机问题
     if (SHOT_MAX > 0 && shotFrames === 10) {
@@ -4904,6 +4974,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const to = focusPreset(id);
     if (!to) return;
     const now = performance.now();
+    /* 自愈：如果上一次的靶点已经被算爆（历史事故留下的 4 公里靶点），
+       不要把它当成"回程终点"继承下来，否则错误会被永久继承。 */
+    if (camTarget && (!isFinite(camTarget.x) || Math.abs(camTarget.x) > 40 ||
+                      Math.abs(camTarget.z) > 40 || camTarget.y > 25 || camTarget.y < -6)) {
+      camTarget = { x: 0, y: 1.6, z: 0 };
+      camRadius = CAM_HOME_R;
+    }
     // 已经在聚焦时又一次开工：留着最开始的视角当"回程终点"，别把中间帧当原位
     const from = focus ? focus.from : {
       theta: camTheta, phi: camPhi, r: camRadius,
@@ -4920,12 +4997,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   function updateFocus(now) {
     const f = focus;
-    const el = now - f.t0;
+    /* el 必须夹到 0 以上：rAF 时间戳可能略早于 startFocus 里的 performance.now()，
+       出现负值时 easeIO() 会把它平方放大成很大的正数，把相机甩到几公里外。
+       这里再夹一次，配合 renderFrame 的毫秒统一，双重保证。 */
+    const el = Math.max(0, now - f.t0);
     let a, b, u;
-    if (el < f.flyIn) { a = f.from; b = f.to; u = easeIO(el / f.flyIn); }
+    if (el < f.flyIn) { a = f.from; b = f.to; u = clamp(easeIO(el / f.flyIn), 0, 1); }
     else if (el < f.flyIn + f.hold) { a = f.to; b = f.to; u = 1; }
     else if (el < f.flyIn + f.hold + f.flyBack) {
-      a = f.to; b = f.from; u = easeIO((el - f.flyIn - f.hold) / f.flyBack);
+      a = f.to; b = f.from; u = clamp(easeIO((el - f.flyIn - f.hold) / f.flyBack), 0, 1);
     } else {                                       // 收尾：精确回到原位
       camTheta = f.from.theta; camPhi = f.from.phi; camRadius = f.from.r;
       camTarget = f.nullT ? null : { x: f.from.t.x, y: f.from.t.y, z: f.from.t.z };
@@ -4942,6 +5022,16 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     camTarget.x = a.t.x + (b.t.x - a.t.x) * u;
     camTarget.y = a.t.y + (b.t.y - a.t.y) * u;
     camTarget.z = a.t.z + (b.t.z - a.t.z) * u;
+    /* 绊线：靶点一旦跑到几百米外，说明插值系数爆了。记下当时的全部输入。
+       （相机跑到 3541m 外、整屏"什么都没有"的事故就是这里冒出来的） */
+    if (!(Math.abs(camTarget.x) < 200 && Math.abs(camTarget.y) < 200 && Math.abs(camTarget.z) < 200) &&
+        !window.__FZ) {
+      window.__FZ = 'el=' + el + ' u=' + u + ' flyIn=' + f.flyIn + ' hold=' + f.hold +
+        ' t0=' + f.t0 + ' now=' + now +
+        ' a.t=' + JSON.stringify(a.t) + ' b.t=' + JSON.stringify(b.t) +
+        ' a.r=' + a.r + ' b.r=' + b.r +
+        ' a.th=' + a.theta + ' b.th=' + b.theta + ' a.ph=' + a.phi + ' b.ph=' + b.phi;
+    }
   }
 
   /* 求一个"围着房间中心、视线不被墙挡"的水平角度，返回离 want 最近的那个。
@@ -6010,9 +6100,176 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         const w = document.createElement('div');
         w.id = 'wallprobe';
         w.textContent = 'WAL' + 'LPROBE theta=' + th.toFixed(3) +
+          ' dk=' + (window.__DK === undefined ? 'NA' : window.__DK.toFixed(1)) +
           ' verdict=' + (Math.abs(th) < 1.0 ? 'FIXED' : 'STILL_BLOCKED');
         document.body.appendChild(w);
       }, 800);
+    }
+    /* #devsettle：纯计算，按 focusPreset 的终点机位复算"到位体检"那三道判据
+       （贴墙 / 视线被挡 / 落在设备盒里）。全 false 才不会弹"镜头被挡住了"。 */
+    if (H.indexOf('#devsettle') === 0) {
+      startGame(1, true);
+      state.cash = 200000;
+      EQUIP_DEF.forEach((e) => (state.equip[e.id] = true));
+      SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
+      syncEquipMeshes(); renderAll();
+      const rows = Object.keys(FOCUS_DEF).map((k) => {
+        const p = focusPreset(k);
+        if (!p) return k + ':NOFOCUS';
+        const sp = Math.sin(p.phi);
+        const px = p.t.x + p.r * sp * Math.sin(p.theta);
+        const py = p.t.y + p.r * Math.cos(p.phi);
+        const pz = p.t.z + p.r * sp * Math.cos(p.theta);
+        const nearWall = px < ROOM_BOX.x0 + 0.20 || px > ROOM_BOX.x1 - 0.20 ||
+                         pz < ROOM_BOX.z0 + 0.20 || pz > ROOM_BOX.z1 - 0.20;
+        const blind = equipBlocks({ x: px, y: py, z: pz }, p.t, k) || wallBlocks({ x: px, y: py, z: pz }, p.t);
+        const inBox = inAnyEquipBox(px, py, pz);
+        return k + (nearWall || blind || inBox ? ':BAD(nw=' + nearWall + ',bl=' + blind + ',ib=' + inBox + ')'
+                                              : ':ok');
+      });
+      const d = document.createElement('div');
+      d.id = 'settle';
+      d.textContent = 'SETT' + 'LE ' + rows.join(' | ');
+      document.body.appendChild(d);
+    }
+    /* #devblack：验证"亮度兜底"的触发路径。
+       把阈值临时抬到 30（正常画面亮度约 24，必然超线），初始视角故意设成非默认，
+       若 900ms 后 theta 变回默认 0.548，说明"检测→复位"整条链路通。
+       ⚠️ 阈值只在调试入口里改，正式运行恒为 6。 */
+    if (H.indexOf('#devblack') === 0) {
+      startGame(1, true);
+      autoSpin = false;
+      window.__DKTH = 40;
+      camTheta = 2.000; camPhi = 1.10; camRadius = 8.0;
+      camTarget = { x: 0, y: 1.6, z: 0 };
+      setTimeout(() => {
+        const w = document.createElement('div');
+        w.id = 'blackprobe';
+        w.textContent = 'BLA' + 'CKPROBE th=' + camTheta.toFixed(3) +
+          ' r=' + camRadius.toFixed(2) +
+          ' dk=' + (window.__DK === undefined ? 'NA' : window.__DK.toFixed(1)) +
+          ' dn=' + window.__DKN + ' th=' + window.__DKTHV +
+          ' verdict=' + (Math.abs(camTheta - 0.548) < 0.01 ? 'RESCUED' : 'NOT_TRIGGERED');
+        document.body.appendChild(w);
+      }, 900);
+    }
+    /* #devreal：**真实链路勘验**。点击真正的「开工」按钮，然后问浏览器：
+       屏幕正中那一点上，最顶层是哪个 DOM 元素？
+       以前所有截图都是 canvas.toDataURL() 导出的 —— 只画 3D，看不见任何盖在上面的
+       DOM 层。这就是为什么"图看着好好的、玩家却说被挡住"。 */
+    if (H.indexOf('#devreal') === 0) {
+      startGame(1, true);
+      EQUIP_DEF.forEach((e) => (state.equip[e.id] = true));
+      SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
+      state.cash = 99999999;
+      syncEquipMeshes(); renderAll();
+      let phase = 0;
+      setTimeout(() => {
+        setTab('works');
+        const btn = document.querySelector('[data-act="part"]');
+        if (btn) btn.click();                        // 走真实的点击 → buildPart → animEquipList → startFocus
+        phase = 1;
+      }, 300);
+      /* 聚焦到位后再取一帧：这一帧才是玩家点完开工真正看到的画面。
+         以前所有截图都取在第 10 帧（还没点开工），所以永远看不到事故现场。 */
+      setTimeout(() => {
+        try {
+          renderFrame(performance.now());
+          const img = document.createElement('img');
+          img.id = 'cap';
+          img.src = renderer.domElement.toDataURL('image/png');
+          document.body.appendChild(img);
+        } catch (e) {}
+      }, 1500);
+      setInterval(() => {
+        if (!phase) return;
+        const w = window.innerWidth, h = window.innerHeight;
+        const el = document.elementFromPoint(w / 2, h / 2);
+        const desc = (n) => {
+          if (!n) return 'null';
+          let s = n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') +
+                  (n.className && typeof n.className === 'string' ? '.' + n.className.trim().replace(/\s+/g, '.') : '');
+          const cs = getComputedStyle(n);
+          s += '[' + cs.backgroundColor + '|z' + cs.zIndex + '|pe:' + cs.pointerEvents + ']';
+          return s;
+        };
+        const chain = [];
+        let p = el;
+        while (p && chain.length < 5) { chain.push(desc(p)); p = p.parentElement; }
+        const mb = document.querySelector('#modal');
+        const sb = document.querySelector('#shell');
+        document.title = 'REAL f=' + (focus ? focus.id : '-') +
+          ' cam(' + camera.position.x.toFixed(2) + ',' + camera.position.y.toFixed(2) + ',' + camera.position.z.toFixed(2) + ')' +
+          ' R=' + camRadius.toFixed(2) + ' th=' + camTheta.toFixed(3) + ' ph=' + camPhi.toFixed(3) +
+          ' T=' + (camTarget ? camTarget.x.toFixed(1) + '/' + camTarget.y.toFixed(1) + '/' + camTarget.z.toFixed(1) : 'null') +
+          ' modal=' + (mb && mb.classList.contains('on')) +
+          ' shell=' + (sb && !sb.classList.contains('hide')) +
+          ' SKEW=' + (clock.getElapsedTime() * 1000 - performance.now()).toFixed(1) +
+          ' SAN=' + (window.__SANITY || 0) +
+          ' FZ[' + (window.__FZ || '-') + ']' +
+          ' HIT=' + chain.join(' < ');
+      }, 300);
+    }
+    /* #devblock：现场勘验。把相机摆到每台设备"开工聚焦"的真实机位上，
+       然后从相机朝屏幕打 25 条射线，报出**到底是谁在挡**。
+       这是唯一可靠的定性手段：不再假设遮挡物是墙还是设备，直接问渲染器。 */
+    if (H.indexOf('#devblock') === 0) {
+      startGame(1, true);
+      EQUIP_DEF.forEach((e) => (state.equip[e.id] = true));
+      SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
+      syncEquipMeshes(); renderAll();
+      autoSpin = false;
+      const ids = ['lathe', 'drill', 'welder', 'printer', 'scope', 'cnc', 'cab', 'cad'];
+      const lines = [];
+      const rc = new T.Raycaster();
+      const who = (o) => {
+        let p = o, depth = 0;
+        while (p && depth < 14) {
+          if (outerWalls.indexOf(p) >= 0) return 'WALL';
+          for (const k in equipMeshes) if (equipMeshes[k] === p) return 'EQ:' + k;
+          for (const k in stations) if (stations[k] === p) return 'ST:' + k;
+          p = p.parent; depth++;
+        }
+        return 'o:' + (o.name || o.type || '?');
+      };
+      const visOK = (o) => { let p = o; while (p) { if (p.visible === false) return false; p = p.parent; } return true; };
+      let bi = 0;
+      setInterval(() => {
+        if (bi >= ids.length) return;
+        const id = ids[bi];
+        const pr = focusPreset(id);
+        if (!pr) { lines.push(id + '=NULL'); bi++; document.title = 'BLOCK ' + lines.join(' || '); return; }
+        camTheta = pr.theta; camPhi = pr.phi; camRadius = pr.r; camTarget = pr.t;
+        focus = {
+          id, from: { theta: pr.theta, phi: pr.phi, r: pr.r, t: pr.t }, to: pr,
+          nullT: false, t0: performance.now() - 5000, flyIn: 850, flyBack: 900, hold: 60000
+        };
+        renderFrame(performance.now());
+        const counts = {};
+        let near = 0, cenDist = -1, cenWho = '-';
+        for (let gy = 0; gy < 5; gy++) {
+          for (let gx = 0; gx < 5; gx++) {
+            rc.setFromCamera({ x: (gx - 2) / 2.6, y: (gy - 2) / 2.6 }, camera);
+            rc.near = 0.02; rc.far = 80;
+            const hits = rc.intersectObjects(scene.children, true).filter((h) =>
+              h.object.isMesh && visOK(h.object) &&
+              !(h.object.material && h.object.material.transparent && h.object.material.opacity < 0.35));
+            const h0 = hits[0];
+            if (gx === 2 && gy === 2 && h0) { cenDist = h0.distance; cenWho = who(h0.object); }
+            if (!h0) { counts.none = (counts.none || 0) + 1; continue; }
+            const lbl = who(h0.object);
+            counts[lbl] = (counts[lbl] || 0) + 1;
+            if (h0.distance < 1.30) near++;
+          }
+        }
+        const c = camera.position;
+        lines.push(id + ' cam(' + c.x.toFixed(2) + ',' + c.y.toFixed(2) + ',' + c.z.toFixed(2) +
+          ') r=' + pr.r.toFixed(2) + ' near=' + near + '/25 cen=' + cenDist.toFixed(2) + '@' + cenWho +
+          ' {' + Object.keys(counts).map((k) => k + ':' + counts[k]).join(' ') + '}');
+        focus = null;
+        bi++;
+        document.title = 'BLOCK ' + lines.join(' || ');
+      }, 45);
     }
     // #devf<id>：直接用"干活自动聚焦"的机位看任意一台设备（lathe/drill/welder/printer/...）
     //   专门用来验证"聚焦后玩家到底看不看得见"，这是"全黑"事故的回归测试入口
