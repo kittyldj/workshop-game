@@ -7,9 +7,9 @@
     "build": "node build.js"
   },
   "license": "AGPL-3.0-or-later",
-  "author": "TODO: 你的署名",
+  "author": "cody_lau <26552418@qq.com> (https://github.com/cody_lau)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/TODO/workshop-game"
+    "url": "https://github.com/cody_lau/workshop-game"
   }
 }
