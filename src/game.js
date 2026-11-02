@@ -999,56 +999,84 @@
     g.add(box(0.5, 0.28, 0.06, MAT.black, -0.34, 1.0, 0.52));
     g.add(box(0.08, 0.08, 0.02, MAT.mg, 0.16, 1.05, 0.56));
     g.add(cyl(0.1, 0.1, 0.14, MAT.black, 0.52, 0.85, 0.5));
-    /* ---------- 焊接小台 + 工件（弧光的落点，否则电弧悬在半空很假）----------
-       放在机身左前侧：+x 方向背后贴墙、从房间内看会被机箱挡住，看不到弧光 */
-    const WX = -1.05, WZ = 0.45;         // 焊接台中心（模型局部坐标）
-    g.add(box(0.44, 0.045, 0.36, MAT.steelDark, WX, 0.31, WZ));            // 台面
-    [[-0.19, -0.15], [0.19, -0.15], [-0.19, 0.15], [0.19, 0.15]].forEach(([a, b]) => {
-      g.add(box(0.035, 0.31, 0.035, MAT.steelDark, WX + a, 0.155, WZ + b)); // 四条腿
+    /* ---------- 焊接工位（弧光的落点）----------
+       焊机本体在木工房构图里贴着画面右边缘，玩家默认视角几乎看不到；
+       所以把工位拉到机身左前方约 2.2m 的空地（局部 -1.59 / -1.36 → 世界约 0.55 / -1.25），
+       那里没有家具遮挡、正好在画面中央偏右。
+       另外做成齐腰高的焊台：0.3m 的矮台在 6.7m 机位下只有几十像素，等于没做 */
+    const WX = -1.59, WZ = -1.36;        // 焊接台中心（模型局部坐标）
+    const TH = 0.75;                     // 台面高度
+    g.add(box(0.60, 0.06, 0.48, MAT.steelDark, WX, TH, WZ));               // 台面
+    [[-0.25, -0.19], [0.25, -0.19], [-0.25, 0.19], [0.25, 0.19]].forEach(([a, b]) => {
+      g.add(box(0.050, TH, 0.050, MAT.steelDark, WX + a, TH / 2, WZ + b));  // 四条腿
     });
-    g.add(box(0.40, 0.02, 0.32, MAT.steelDark, WX, 0.115, WZ));            // 下横撑
+    g.add(box(0.50, 0.028, 0.42, MAT.steelDark, WX, 0.24, WZ));            // 下横撑
+    g.add(box(0.60, 0.035, 0.07, MAT.steelDark, WX, TH + 0.048, WZ - 0.21)); // 后挡条
     // 工件：横板 + 立板，交界处就是焊缝
-    g.add(box(0.26, 0.040, 0.09, MAT.steel, WX - 0.04, 0.3525, WZ));
-    g.add(box(0.04, 0.16, 0.09, MAT.steel, WX + 0.05, 0.4525, WZ));
+    g.add(box(0.34, 0.050, 0.12, MAT.steel, WX - 0.05, TH + 0.055, WZ));
+    g.add(box(0.050, 0.20, 0.12, MAT.steel, WX + 0.06, TH + 0.180, WZ));
 
-    /* ---------- 焊枪（可摆动：枪口是 torchG 的局部原点）---------- */
+    /* ---------- 焊把（焊枪）：整体放大到全景也认得出的尺度 ----------
+       真实氩弧焊枪约 0.25m，这里做到 0.42m、管径加粗——纯按真实尺寸在远景下只有几个像素 */
     const torchG = new T.Group();
-    torchG.position.set(WX + 0.03, 0.40, WZ);
-    torchG.add(cyl(0.028, 0.021, 0.09, new T.MeshStandardMaterial({
+    torchG.position.set(WX + 0.04, TH + 0.11, WZ);
+    torchG.add(cyl(0.035, 0.026, 0.12, new T.MeshStandardMaterial({
       color: 0xc9c2ae, roughness: 0.62, metalness: 0.05
-    }), 0, 0.045, 0, 16));                                                 // 陶瓷喷嘴
-    torchG.add(cyl(0.020, 0.020, 0.05, MAT.brass, 0, 0.115, 0, 12));       // 铜接头
-    torchG.add(cyl(0.019, 0.019, 0.15, MAT.steel, 0, 0.21, 0, 12));        // 枪管
-    const grip = box(0.048, 0.13, 0.048, MAT.black, -0.008, 0.20, 0.055);  // 手柄
+    }), 0, 0.060, 0, 16));                                                 // 陶瓷喷嘴（土黄）
+    torchG.add(cyl(0.029, 0.029, 0.07, MAT.brass, 0, 0.155, 0, 12));       // 铜接头
+    torchG.add(cyl(0.031, 0.031, 0.23, MAT.steel, 0, 0.300, 0, 12));       // 枪管（加粗）
+    const grip = box(0.072, 0.17, 0.072, MAT.black, -0.012, 0.280, 0.082); // 手柄
     grip.rotation.x = -0.26; torchG.add(grip);
-    torchG.add(cyl(0.015, 0.015, 0.055, MAT.black, 0, 0.285, -0.015, 10)); // 尾部电缆接头
+    torchG.add(cyl(0.022, 0.022, 0.08, MAT.black, 0, 0.425, -0.024, 10));  // 尾部电缆接头
     torchG.rotation.z = -0.12;
     g.add(torchG);
 
-    /* ---------- 电缆：机身接口 → 枪尾 ---------- */
+    /* ---------- 电缆：机身接口 → 拖地 → 枪尾 ---------- */
     const curve = new T.CatmullRomCurve3([
-      new T.Vector3(0.45, 0.85, 0.52), new T.Vector3(-0.18, 0.56, 0.82),
-      new T.Vector3(-0.78, 0.34, 0.68), new T.Vector3(-1.02, 0.66, 0.44)
+      new T.Vector3(0.45, 0.85, 0.52), new T.Vector3(-0.10, 0.30, 0.05),
+      new T.Vector3(-0.85, 0.05, -0.55), new T.Vector3(-1.62, 0.06, -1.02),
+      new T.Vector3(-1.55, 1.20, -1.38)
     ]);
-    const tube = new T.Mesh(new T.TubeGeometry(curve, 26, 0.030, 8, false), MAT.black);
+    const tube = new T.Mesh(new T.TubeGeometry(curve, 40, 0.026, 8, false), MAT.black);
     tube.castShadow = true;
     g.add(tube);
 
-    /* ---------- 弧光：一个小发光球 + 真正的点光源（会照亮工件和台面）---------- */
-    const arc = new T.Mesh(new T.SphereGeometry(0.042, 12, 10),
-      new T.MeshBasicMaterial({ color: 0xeaf4ff }));
-    arc.position.set(WX + 0.03, 0.378, WZ);
+    /* ---------- 电弧：核心发光球 + 一层朝向相机的大光晕 ----------
+       远处的电弧只有靠光晕才看得见——真实拍摄也是这个原理 */
+    const arc = new T.Mesh(new T.SphereGeometry(0.090, 14, 12),
+      new T.MeshBasicMaterial({ color: 0xf2f8ff }));
+    arc.position.set(WX + 0.04, TH + 0.095, WZ);
     arc.visible = false;
     g.add(arc);
-    const arcLight = new T.PointLight(0xc4dcff, 0, 2.6, 2);
+    // Sprite 没有贴图时就是一个实心白方块 —— 必须给一张径向渐变，才是"光晕"
+    const haloTex = (() => {
+      const cv = document.createElement('canvas');
+      cv.width = cv.height = 128;
+      const cx = cv.getContext('2d');
+      const gr = cx.createRadialGradient(64, 64, 0, 64, 64, 64);
+      gr.addColorStop(0.00, 'rgba(255,255,255,1)');
+      gr.addColorStop(0.18, 'rgba(226,238,255,0.62)');
+      gr.addColorStop(0.45, 'rgba(170,200,255,0.20)');
+      gr.addColorStop(1.00, 'rgba(140,175,255,0)');
+      cx.fillStyle = gr; cx.fillRect(0, 0, 128, 128);
+      return new T.CanvasTexture(cv);
+    })();
+    const halo = new T.Sprite(new T.SpriteMaterial({
+      map: haloTex, color: 0xd6e6ff, transparent: true, opacity: 0, depthWrite: false,
+      blending: T.AdditiveBlending
+    }));
+    halo.position.copy(arc.position);
+    halo.scale.set(0.85, 0.85, 1);
+    g.add(halo);
+    const arcLight = new T.PointLight(0xc4dcff, 0, 3.4, 2);
     arcLight.position.copy(arc.position);
     g.add(arcLight);
 
-    /* ---------- 火花粒子 ---------- */
+    /* ---------- 火花粒子：加大加多，全景下也要看得出"在冒火星" ---------- */
     const sparks = [];
-    const sparkMat = new T.MeshBasicMaterial({ color: 0xffdf92 });
-    for (let i = 0; i < 18; i++) {
-      const s = new T.Mesh(new T.BoxGeometry(0.013, 0.013, 0.013), sparkMat);
+    const sparkMat = new T.MeshBasicMaterial({ color: 0xffc46b });
+    for (let i = 0; i < 50; i++) {
+      const s = new T.Mesh(new T.BoxGeometry(0.042, 0.042, 0.042), sparkMat);
       s.visible = false;
       s.userData = { v: new T.Vector3(), life: 0 };
       g.add(s);
@@ -1061,10 +1089,12 @@
     g.add(glow);
 
     g.userData.arc = arc;
+    g.userData.halo = halo;
     g.userData.arcLight = arcLight;
     g.userData.torch = torchG;
     g.userData.torchZ = WZ;
     g.userData.sparks = sparks;
+    g.userData.sparkFloor = TH + 0.012;   // 焊台台面，火花落到这里就熄
     g.userData.glowMat = glowMat;
     return g;
   }
@@ -3048,10 +3078,10 @@
     s.position.copy(ud.arc.position);
     // 电弧把熔化的铁水甩出去：以斜上方为主，方向随机散开
     const a = Math.random() * Math.PI * 2;
-    const sp = 0.30 + Math.random() * 0.85;
-    s.userData.v.set(Math.cos(a) * sp, 0.55 + Math.random() * 1.15, Math.sin(a) * sp);
-    s.userData.life = 0.28 + Math.random() * 0.42;
-    s.scale.setScalar(0.55 + Math.random() * 0.9);
+    const sp = 0.55 + Math.random() * 1.65;
+    s.userData.v.set(Math.cos(a) * sp, 0.70 + Math.random() * 1.50, Math.sin(a) * sp);
+    s.userData.life = 0.50 + Math.random() * 0.55;
+    s.scale.setScalar(0.55 + Math.random() * 0.85);
   }
 
   function renderFrame(t) {
@@ -3187,7 +3217,9 @@
           : 0;
         ud.dbgFlick = flick;                 // 调试入口读用
         ud.arc.visible = on && flick > 0.22;
-        ud.arc.scale.setScalar(0.68 + flick * 0.85);
+        ud.arc.scale.setScalar(0.70 + flick * 0.80);
+        ud.halo.material.opacity = on ? 0.45 + flick * 0.50 : 0;
+        ud.halo.scale.set(0.62 + flick * 0.55, 0.62 + flick * 0.55, 1);
         ud.arcLight.intensity = on ? 2.0 + flick * 16.0 : 0;
         ud.glowMat.emissiveIntensity = on ? 3.2 : 0.6;
 
@@ -3200,16 +3232,14 @@
 
         // 火花：密度跟亮度走，弧光亮的时候甩得更多
         ud.sparkT = (ud.sparkT || 0) + dt;
-        if (on && ud.sparkT > 0.030) { ud.sparkT = 0; if (flick > 0.45) spawnWeldSpark(ud); }
+        if (on && ud.sparkT > 0.022) { ud.sparkT = 0; if (flick > 0.40) spawnWeldSpark(ud); }
         ud.sparks.forEach((s) => {
           if (s.userData.life <= 0) return;
           s.userData.life -= dt;
-          s.userData.v.y -= 7.4 * dt;
+          s.userData.v.y -= 6.2 * dt;              // 焊渣不重，落得比铁屑慢
           s.position.addScaledVector(s.userData.v, dt);
           s.rotation.x += dt * 12; s.rotation.z += dt * 9;
-          if (s.position.y < 0.34) {               // 落到台面/工件上就熄了
-            s.userData.life = 0;
-          }
+          if (s.position.y < (ud.sparkFloor || 0.02)) s.userData.life = 0;  // 落到台面上就熄了
           if (s.userData.life <= 0) s.visible = false;
         });
       }
@@ -3420,7 +3450,13 @@
     anim[id] = performance.now() + (ms || 1600);
     if (id === 'drill') { anim.drillDur = ms || 1600; if (SFX.drill) SFX.drill(ms || 1600); }
     else if (id === 'lathe') { anim.latheDur = ms || 1500; if (SFX.lathe) SFX.lathe(ms || 1500); }
-    else if (id === 'welder') { anim.weldDur = ms || 1500; if (SFX.weld) SFX.weld(ms || 1500); }
+    else if (id === 'welder') {
+      // 焊接的视觉是"一闪就过"：1.5 秒的弧光基本会被玩家错过，
+      // 所以单独拉长到至少 4.2 秒，让火花有时间铺开
+      const d = Math.max(4200, (ms || 1500) * 3);
+      anim.weldDur = d; anim.weld = performance.now() + d;
+      if (SFX.weld) SFX.weld(d);
+    }
     lastInteract = performance.now();
     return true;
   }
@@ -4265,8 +4301,14 @@
       SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
       syncEquipMeshes(); renderAll();
       autoSpin = false;
-      camTheta = -1.31; camPhi = 1.146; camRadius = 3.00;
-      camTarget = { x: 2.50, y: 0.55, z: -1.20 };
+      // #dev7wide：用玩家默认的木工房全景机位，用来检查"正常距离下看不看得见"
+      if (H.indexOf('#dev7wide') === 0) {
+        camTheta = CAM_WOOD.theta; camPhi = CAM_WOOD.phi; camRadius = CAM_WOOD.r;
+        camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
+      } else {
+        camTheta = -1.31; camPhi = 1.146; camRadius = 3.00;
+        camTarget = { x: 2.50, y: 0.55, z: -1.20 };
+      }
       anim.weld = performance.now() + 600000; anim.weldDur = 600000;
       // 无头环境 rAF 帧数极少，手动推帧让火花真的飞出来
       let wN = 0;
