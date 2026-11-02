@@ -5002,6 +5002,24 @@
     SFX.good();
   }
 
+  /* ---------------- 测试后门 A A A ----------------
+     技能全 5、设备全买、现金给到花不完、声望拉满（让四级/五级订单也能刷出来）。
+     已在局中就地改当前档并立即存档；在标题页则开 1 号档。
+     ⚠️ 会覆盖当前存档，属于有意的测试行为。 */
+  function godMode() {
+    if (!state || !state.started) startGame(1, true);
+    if (!state) return;
+    state.cash = 99999999;
+    state.rep = 999;
+    SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
+    EQUIP_DEF.forEach((e) => (state.equip[e.id] = true));
+    syncEquipMeshes();
+    renderAll();
+    save();
+    toast('测试档案：技能全满 · 设备全开 · 现金 ' + fmt(state.cash), 'good');
+    SFX.good();
+  }
+
   function toTitle() {
     save();
     SFX.ambient(false);
@@ -5110,6 +5128,23 @@
         if (state && state.started && !shellOpen()) { e.preventDefault(); skipSlot(); }
       }
     });
+
+    /* ---------------- 测试后门：连按 A A A 调出满血档案 ----------------
+       给开发和验收用，正常玩家不会误触（连按三次 A 且间隔小于 1.5 秒）。
+       已在局中就地改当前档并立即存档；在标题页则开 1 号档。
+       ⚠️ 会覆盖当前存档，属于有意的测试行为。 */
+    let cheatBuf = '', cheatLast = 0;
+    window.addEventListener('keydown', (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.key !== 'a' && e.key !== 'A') { cheatBuf = ''; return; }
+      const now = performance.now();
+      if (now - cheatLast > 1500) cheatBuf = '';      // 手慢就不算连按，避免误触
+      cheatLast = now;
+      cheatBuf = (cheatBuf + 'a').slice(-3);
+      if (cheatBuf === 'aaa') { cheatBuf = ''; godMode(); }
+    });
   }
 
   let booted = false;
@@ -5159,6 +5194,8 @@
       camTheta = CAM_WOOD.theta; camPhi = CAM_WOOD.phi; camRadius = CAM_WOOD.r;
       camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
     }
+    // #god：等同于连按三次 A 的后门，供无头脚本验证（玩家用键盘 A A A）
+    if (H.indexOf('#god') >= 0) godMode();
     // #dev6：车床特写，用于逐件打磨（不影响玩家）
     // #dev6run：车床常开 + 全景机位，并把运动量写进 title，供无头脚本验证动画在跑
     if (H.indexOf('#dev6') === 0) {
