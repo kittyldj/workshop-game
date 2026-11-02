@@ -37,6 +37,9 @@
     gap:10px; padding:10px 12px 8px; pointer-events:none;}
   #app.hide{display:none;}
   #hud, .panel, #logbar{pointer-events:auto;}
+  /* 中央占位面板本身是空的，必须让指针穿透到 canvas，
+     否则屏幕正中这一大片区域按下鼠标不会旋转视角（桌面/全屏尤其明显） */
+  #p-center{pointer-events:none;}
 
   /* ---------- HUD ---------- */
   #hud{grid-column:1 / -1; display:flex; align-items:center; gap:14px;
