@@ -3710,7 +3710,7 @@
     // 干活自动聚焦：推近 → 停留 → 退回
     if (focus) updateFocus(t);
 
-    // 聚焦被玩家打断后的回家过渡：靶点搬回房间中心、半径拉回全景
+    // 聚焦被玩家打断后的回家过渡：靶点搬回房间中心、半径拉回全景、角度转正到通视方向
     if (camHome) {
       const u = clamp((t - camHome.t0) / 520, 0, 1), e = easeIO(u);
       camTarget = {
@@ -3720,6 +3720,10 @@
       };
       const R1 = Math.max(CAM_HOME_R, camHome.r);
       camRadius = camHome.r + (R1 - camHome.r) * e;
+      let dth = camHome.thTo - camHome.th;                 // 角度走最短弧转正
+      while (dth > Math.PI) dth -= Math.PI * 2;
+      while (dth < -Math.PI) dth += Math.PI * 2;
+      camTheta = camHome.th + dth * e;
       if (u >= 1) { camHome = null; camTarget = null; }   // 交回自动环绕
     }
 
@@ -3730,26 +3734,42 @@
       LT.z + camRadius * Math.sin(camPhi) * Math.cos(camTheta)
     );
     place();
-    /* 屋外兜底：非聚焦时相机绝不允许落进屋壳内。
-       滚轮/捏合缩放把它缩进屋、或者靶点偏离中心时，都会让相机贴到墙背面，
-       整屏被糊住。这里沿"靶点→相机"的方向把半径推到墙外 0.55m。 */
-    if (!focus && !camNoGuard && insideRoom(camera.position)) {
-      const dx = camera.position.x - LT.x;
-      const dy = camera.position.y - LT.y;
-      const dz = camera.position.z - LT.z;
-      const L = Math.hypot(dx, dy, dz) || 1;
-      camRadius = exitDist(LT, dx / L, dy / L, dz / L) + 0.55;
-      place();
+    /* 非聚焦时的两道守卫。房间只在 +z 一侧敞开，另三面是实墙 ——
+       相机一绕到侧后方，视线就穿墙，整屏是一块墙的背面，玩家怎么转都出不来。
+       ① 相机落进屋壳内（缩放太狠、靶点偏移）→ 把半径直接拉回全景；
+          以前是"沿视线推到墙外 0.55m"，但推到墙外只是换个位置，视线照样穿墙；
+       ② 视线穿墙 → 水平方向旋转到最近的通视角度（±3.75° 一档，最多绕一圈）。 */
+    if (!focus && !camNoGuard) {
+      if (insideRoom(camera.position)) {
+        camRadius = Math.max(camRadius, CAM_HOME_R);
+        place();
+      }
+      if (wallBlocks(camera.position, LT)) {
+        const th0 = Math.atan2(Math.sin(camTheta), Math.cos(camTheta));
+        const sp = Math.sin(camPhi), wy = camera.position.y;
+        let fixed = null;
+        for (let k = 1; k <= 48 && fixed === null; k++) {
+          const step = k * (Math.PI / 48);
+          for (let s = -1; s <= 1; s += 2) {
+            const th = th0 + s * step;
+            const px = LT.x + camRadius * sp * Math.sin(th);
+            const pz = LT.z + camRadius * sp * Math.cos(th);
+            if (!wallBlocks({ x: px, y: wy, z: pz }, LT)) { fixed = th; break; }
+          }
+        }
+        camTheta = fixed === null ? th0 : fixed;
+        place();
+      }
     }
-    /* 最后一道闸：就算机位算歪了（设备模型以后改大、或某台设备挤在一起），
-       只要相机落进设备包围盒、或者贴到墙边，就立刻取消聚焦退回全景。
-       玩家永远不会被锁在一块铁皮内壁前面。 */
+    /* 最后一道闸：机位算歪了（设备模型以后改大、或者某台设备挤在一起）也不能让玩家
+       对着铁皮。三道判据 —— 落在设备盒里 / 贴上墙 / **视线穿过别台设备或墙体**
+       —— 任一条成立就立刻取消聚焦退回全景。 */
     if (focus && focus.to) {
       const p = camera.position;
       const nearWall = p.x < ROOM_BOX.x0 + 0.20 || p.x > ROOM_BOX.x1 - 0.20 ||
                        p.z < ROOM_BOX.z0 + 0.20 || p.z > ROOM_BOX.z1 - 0.20;
-      // 任何一台设备的盒里都算被遮住（不只是聚焦的那台）
-      if (nearWall || inAnyEquipBox(p.x, p.y, p.z)) {
+      const blind = equipBlocks(p, focus.to.t, focus.id) || wallBlocks(p, focus.to.t);
+      if (nearWall || blind || inAnyEquipBox(p.x, p.y, p.z)) {
         cancelFocus();
         toast('镜头被挡住了，已退回全景', 'bad');
       }
@@ -4302,24 +4322,46 @@
      只避开自己那台不够 —— 实测台钻的机位会退到数控机顶上，一样是整屏黑。
      盒的对角超过 6.5m 一律丢弃：那说明这个 Group 里混进了场景级物件，盒不可信。 */
   let equipBoxes = null, equipBoxKey = '';
+  /* 个别设备的 Group 里塞了远置附件，AABB 会被撑得离谱：
+     焊机为了"工位在默认机位里看得见"，焊接台被挪到了 2 米外的空地上，
+     结果它的盒变成 x[-0.05,3.71] × z[-3.05,0.30]，把台钻周围整片地面都算成
+     "设备内部"—— 台钻的聚焦机位因此全部被否。这类设备直接指定机身盒。 */
+  const EQUIP_BOX_FIX = { welder: { hx: 0.85, hz: 0.85, y1: 2.0 } };
   function getEquipBoxes() {
     const key = EQUIP_DEF.filter((e) => equipMeshes[e.id]).map((e) => e.id).join(',') + '|' +
                 Object.keys(stations).filter((k) => stations[k]).join(',');
     if (equipBoxes && equipBoxKey === key) return equipBoxes;
     const out = [];
-    const push = (h) => {
+    const ids = [];
+    const push = (h, id) => {
       if (!h) return;
+      const fx = EQUIP_BOX_FIX[id];
+      if (fx) {                                    // 只按机身范围算，忽略远置附件
+        out.push(new T.Box3(
+          new T.Vector3(h.position.x - fx.hx, 0, h.position.z - fx.hz),
+          new T.Vector3(h.position.x + fx.hx, fx.y1, h.position.z + fx.hz)
+        ).expandByScalar(0.22));
+        ids.push(id);
+        return;
+      }
       h.updateMatrixWorld(true);
       const b = new T.Box3().setFromObject(h);
       if (!isFinite(b.min.x)) return;
       const s = b.getSize(new T.Vector3());
       if (Math.hypot(s.x, s.y, s.z) > 6.5) return;
       out.push(b.expandByScalar(0.22));
+      ids.push(id);
     };
-    EQUIP_DEF.forEach((e) => push(equipMeshes[e.id]));
-    Object.keys(stations).forEach((k) => push(stations[k]));
-    equipBoxes = out; equipBoxKey = key;
+    EQUIP_DEF.forEach((e) => push(equipMeshes[e.id], e.id));
+    Object.keys(stations).forEach((k) => push(stations[k], k));
+    equipBoxes = out; equipBoxIds = ids; equipBoxKey = key;
     return out;
+  }
+
+  let equipBoxIds = [];
+  function getEquipBoxIds() {
+    getEquipBoxes();                               // 保证 equipBoxes 已是最新
+    return equipBoxIds;
   }
 
   function inAnyEquipBox(x, y, z) {
@@ -4327,6 +4369,86 @@
     for (let i = 0; i < list.length; i++) {
       const b = list[i];
       if (x > b.min.x && x < b.max.x && y > b.min.y && y < b.max.y && z > b.min.z && z < b.max.z) return true;
+    }
+    return false;
+  }
+
+  /* ---------------- 通视判定（这才是"画面被遮住"的真正解法） ----------------
+     前几轮一直只检查"相机站在哪里"：不在设备盒里、离墙够远就算合格。
+     但**站着的地方合法 ≠ 看得见**：相机可以稳稳站在空地上，视线却正好
+     从一台 2.5m 高的数控机箱里穿过去，或者从侧墙背面看进来 ——
+     屏幕被一整块铁皮/墙糊住，玩家旋转只是在原地换一块遮挡物。
+     所以这里补上真正的判据：线段「相机 → 靶点」有没有穿过实体。 */
+
+  // 线段 p0→p1 是否与轴对齐盒相交（slab 法）。pad 为负可收缩盒（用于宽容设备边缘）
+  function segHitsBox(p0, p1, b, pad) {
+    const o = [p0.x, p0.y, p0.z];
+    const d = [p1.x - p0.x, p1.y - p0.y, p1.z - p0.z];
+    const mn = [b.min.x - pad, b.min.y - pad, b.min.z - pad];
+    const mx = [b.max.x + pad, b.max.y + pad, b.max.z + pad];
+    let t0 = 0, t1 = 1;
+    for (let i = 0; i < 3; i++) {
+      if (Math.abs(d[i]) < 1e-9) {                 // 该轴平行：起点不在区间内就永远不相交
+        if (o[i] < mn[i] || o[i] > mx[i]) return false;
+        continue;
+      }
+      let ta = (mn[i] - o[i]) / d[i], tb = (mx[i] - o[i]) / d[i];
+      if (ta > tb) { const tt = ta; ta = tb; tb = tt; }
+      if (ta > t0) t0 = ta;
+      if (tb < t1) t1 = tb;
+      if (t0 > t1) return false;
+    }
+    return t1 - t0 > 1e-6;
+  }
+
+  /* 三面实墙 + 天花板。房间只在 +z 一侧敞开（正面无墙），
+     所以相机一旦绕到左/右/后侧，视线必然穿墙 —— 这就是"怎么转都看不到"。 */
+  const WALL_BOXES = [
+    // 后墙（带窗，窗上有不透明天光贴图，按实心处理）
+    new T.Box3(new T.Vector3(ROOM_BOX.x0 - 0.3, ROOM_BOX.y0 - 0.2, ROOM_BOX.z0 - 0.3),
+               new T.Vector3(ROOM_BOX.x1 + 0.3, ROOM_BOX.y1, ROOM_BOX.z0 + 0.28)),
+    // 左墙 / 右墙
+    new T.Box3(new T.Vector3(ROOM_BOX.x0 - 0.28, ROOM_BOX.y0 - 0.2, ROOM_BOX.z0 - 0.3),
+               new T.Vector3(ROOM_BOX.x0 + 0.28, ROOM_BOX.y1, ROOM_BOX.z1 + 0.3)),
+    new T.Box3(new T.Vector3(ROOM_BOX.x1 - 0.28, ROOM_BOX.y0 - 0.2, ROOM_BOX.z0 - 0.3),
+               new T.Vector3(ROOM_BOX.x1 + 0.28, ROOM_BOX.y1, ROOM_BOX.z1 + 0.3))
+  ];
+
+  function wallBlocks(p0, p1) {
+    for (let i = 0; i < WALL_BOXES.length; i++) if (segHitsBox(p0, p1, WALL_BOXES[i], 0)) return true;
+    return false;
+  }
+
+  /* 视线是否被"除目标设备以外"的设备挡住。
+     两级判定：先用 AABB 粗筛（快，但 AABB 比真实几何大一圈、旋转设备还会放大 1.4 倍），
+     命中后再对那台设备的真实网格做一次射线检测 —— 只有真的打到了实体才算挡住。
+     少这一级就会误判：台钻的锚点落在焊机被撑大的 AABB 里，粗筛必然报"被挡"。 */
+  const _ray = new T.Raycaster();
+  const _rayO = new T.Vector3();
+  const _rayD = new T.Vector3();
+  function equipBlocks(p0, p1, ignoreId) {
+    const list = getEquipBoxes(), ids = getEquipBoxIds();
+    const dx = p1.x - p0.x, dy = p1.y - p0.y, dz = p1.z - p0.z;
+    const L = Math.hypot(dx, dy, dz);
+    if (L < 1e-4) return false;
+    _rayO.set(p0.x, p0.y, p0.z);
+    _rayD.set(dx / L, dy / L, dz / L);
+    for (let i = 0; i < list.length; i++) {
+      if (ids[i] === ignoreId) continue;
+      if (!segHitsBox(p0, p1, list[i], -0.10)) continue;   // 粗筛：盒都没碰就不可能是它
+      const h = (ids[i] === 'cab' || ids[i] === 'cad') ? stations[ids[i]] : equipMeshes[ids[i]];
+      if (!h) continue;
+      _ray.set(_rayO, _rayD);
+      _ray.near = 0.05;
+      _ray.far = L * 0.985;                                // 别被靶点附近的几何误伤
+      const hits = _ray.intersectObject(h, true);
+      for (let j = 0; j < hits.length; j++) {
+        const m = hits[j].object;
+        if (!m.isMesh) continue;
+        const mt = m.material;
+        if (mt && (mt.transparent && mt.opacity < 0.5)) continue;   // 玻璃门/光晕不算遮挡
+        return true;
+      }
     }
     return false;
   }
@@ -4360,6 +4482,9 @@
       if (px < cx0 || px > cx1 || pz < cz0 || pz > cz1) return null;
       if (ownOk && px > own.min.x && px < own.max.x && py > own.min.y && py < own.max.y && pz > own.min.z && pz < own.max.z) return null;
       if (strict && inAnyEquipBox(px, py, pz)) return null;
+      // ★ 站着的位置合法不够，还必须"看得见"：视线不得穿过别台设备或墙体
+      const eye = { x: px, y: py, z: pz };
+      if (strict && (equipBlocks(eye, v, id) || wallBlocks(eye, v))) return null;
       const dx = px - v.x, dy = py - v.y, dz = pz - v.z;
       const r = Math.hypot(dx, dy, dz);
       if (r < 2.2) return null;
@@ -4372,25 +4497,19 @@
       };
     };
 
-    // ① 朝房间中心退（严格：避开所有设备盒）
-    const bx = -v.x, bz = -v.z;
-    const BL = Math.hypot(bx, bz) || 1;
-    const ux = bx / BL, uz = bz / BL;
-    for (let d = 2.6; d <= 4.7; d += 0.3) {
-      const got = tryAt(v.x + ux * d, clamp(v.y + 0.55, 1.0, 2.5), v.z + uz * d, true);
-      if (got) return got;
-    }
-    // ② 设备正前方（严格）
-    const ry = holder.rotation.y || 0;
-    for (let d = 2.4; d <= 4.0; d += 0.3) {
-      const got = tryAt(v.x + Math.sin(ry) * d, clamp(v.y + (def.up || 0.4), 1.0, 2.5), v.z + Math.cos(ry) * d, true);
-      if (got) return got;
-    }
-    // ③ 宽松重来：只保证不出房间、不在自己壳里。朝中心的方向基本是空地，
-    //    真要是压在隔壁设备上，开局后每帧的健康检查会立刻把它退回来。
-    for (let d = 2.8; d <= 4.7; d += 0.3) {
-      const got = tryAt(v.x + ux * d, clamp(v.y + 0.55, 1.0, 2.5), v.z + uz * d, false);
-      if (got) return got;
+    /* ① 环绕设备一圈找机位：先朝房间中心（最容易通视），再左右偏 40°/80°/120°，最后背面。
+       同一方向由近到远，优先近景。每一档都必须同时满足三件事：
+         站在房间内 + 不落进任何设备的盒里 + **视线不被别台设备或墙体挡住**。
+       一个都不满足就 return null —— 宁可不聚焦（镜头纹丝不动），也绝不推到黑屏上。 */
+    const base = Math.atan2(-v.x, -v.z);           // 锚点 → 房间中心的方位角
+    const dirs = [0, 0.70, -0.70, 1.40, -1.40, 2.10, -2.10, Math.PI];
+    for (let k = 0; k < dirs.length; k++) {
+      const a = base + dirs[k];
+      const ux = Math.sin(a), uz = Math.cos(a);
+      for (let d = 2.1; d <= 4.9; d += 0.3) {
+        const got = tryAt(v.x + ux * d, clamp(v.y + 0.55, 1.0, 2.5), v.z + uz * d, true);
+        if (got) return got;
+      }
     }
     return null;                                   // 实在放不下 → 不聚焦，保持玩家视角
   }
@@ -4439,17 +4558,38 @@
     camTarget.z = a.t.z + (b.t.z - a.t.z) * u;
   }
 
+  /* 求一个"围着房间中心、视线不被墙挡"的水平角度，返回离 want 最近的那个。
+     房间只在 +z 一侧敞开，所以从敞口那边看必然通视；从侧后方看就是一块墙。
+     取消聚焦时用它决定"回家"要转到哪儿 —— 只拉远不转正，回去还是一堵墙。 */
+  function openTheta(want) {
+    const sp = Math.sin(camPhi);
+    const R = CAM_HOME_R, wy = 1.6 + R * Math.cos(camPhi);
+    const th0 = Math.atan2(Math.sin(want), Math.cos(want));
+    for (let k = 0; k <= 48; k++) {
+      const step = k * (Math.PI / 48);
+      const cands = k === 0 ? [th0] : [th0 - step, th0 + step];
+      for (let i = 0; i < cands.length; i++) {
+        const th = cands[i];
+        const px = R * sp * Math.sin(th), pz = R * sp * Math.cos(th);
+        if (!wallBlocks({ x: px, y: wy, z: pz }, { x: 0, y: 1.6, z: 0 })) return th;
+      }
+    }
+    return th0;
+  }
+
   /* 玩家一动手就交出镜头控制权。
-     这里的关键不是"把半径弹大一点"，而是**把靶点从设备搬回房间中心**：
-     靶点留在设备上时，玩家一转视角，相机就绕着这台（多半贴墙的）设备画圆，
-     圆有一半落在墙里或机箱里 —— 看到的是一整块黑，而且越转越出不来。
-     所以取消聚焦时启动一段 520ms 的"回家"过渡，靶点回中心、半径回全景。 */
+     两个关键动作，缺一样就还是黑屏：
+       ① 把靶点从设备搬回房间中心 —— 否则玩家一转，相机就绕着贴墙设备画圆；
+       ② 把水平角度转到"通视"的那个方向 —— 否则退回全景只是"离远了看一堵墙"。
+     这就是上一版"提示已退回全景、但仍然看不到"的原因：只做了 ①，没做 ②。 */
   function cancelFocus() {
     if (!focus) return;
     camHome = {
       t0: performance.now(),
       t: camTarget ? { x: camTarget.x, y: camTarget.y, z: camTarget.z } : { x: 0, y: 1.6, z: 0 },
       r: camRadius,
+      th: camTheta,
+      thTo: openTheta(camTheta),
       home: { x: 0, y: 1.6, z: 0 }
     };
     focus = null;
@@ -5452,6 +5592,17 @@
         const oldCz = Math.min(3.30, Math.max(-4.30, v.z + Math.cos(ry) * def.d));
         const oldR = Math.hypot(oldCx - v.x, def.up, oldCz - v.z);
         const p = focusPreset(k);
+        if (k === 'drill') {                       // 定位 drill 找不到机位的原因
+          const bs = getEquipBoxes(), ids = getEquipBoxIds();
+          const dg = ['anchor ' + v.x.toFixed(2) + ',' + v.y.toFixed(2) + ',' + v.z.toFixed(2)];
+          bs.forEach((b, i) => dg.push(ids[i] + '[' + b.min.x.toFixed(2) + '~' + b.max.x.toFixed(2) +
+            ',' + b.min.y.toFixed(2) + '~' + b.max.y.toFixed(2) +
+            ',' + b.min.z.toFixed(2) + '~' + b.max.z.toFixed(2) + ']'));
+          const e9 = document.createElement('div');
+          e9.id = 'fdbox';
+          e9.textContent = 'FDB' + 'OX ' + dg.join(' ');
+          document.body.appendChild(e9);
+        }
         return k + ' oldR=' + oldR.toFixed(2) + ' newR=' + (p ? p.r.toFixed(2) : 'NULL');
       });
       const d9 = document.createElement('div');
@@ -5459,6 +5610,23 @@
       // 标记拆开拼，避免这串字面量出现在 DOM 的 <script> 源码里、被 dump-dom 抢先匹配
       d9.textContent = 'FDU' + 'MP ' + rows.join(' | ');
       document.body.appendChild(d9);
+    }
+    /* #devwall：把镜头强行放到"正后方"（隔着后墙看，一定全黑），
+       验证非聚焦守卫会不会把角度转正。既做数值判定（写进 DOM），也可直接截图看画面。 */
+    if (H.indexOf('#devwall') === 0) {
+      startGame(1, true);
+      autoSpin = false;
+      camTarget = null;                      // 围着房间中心
+      camPhi = 1.335; camRadius = 6.68;
+      camTheta = Math.PI;                    // 正后方：旧代码在这里就是一堵后墙
+      setTimeout(() => {
+        const th = Math.atan2(Math.sin(camTheta), Math.cos(camTheta));
+        const w = document.createElement('div');
+        w.id = 'wallprobe';
+        w.textContent = 'WAL' + 'LPROBE theta=' + th.toFixed(3) +
+          ' verdict=' + (Math.abs(th) < 1.0 ? 'FIXED' : 'STILL_BLOCKED');
+        document.body.appendChild(w);
+      }, 800);
     }
     // #devf<id>：直接用"干活自动聚焦"的机位看任意一台设备（lathe/drill/welder/printer/...）
     //   专门用来验证"聚焦后玩家到底看不看得见"，这是"全黑"事故的回归测试入口
