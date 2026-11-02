@@ -185,6 +185,16 @@
       const n = 7, gap = Math.max(110, (ms || 1500) / n);
       for (let i = 0; i < n; i++) setTimeout(() => this.noise(0.055, 0.019, 6800), i * gap);
     },
+    cnc(ms) {
+      if (!this.ready || !settings.sfx) return;
+      // 数控是"高频主轴啸叫 + 规律进刀的闷响"，比车床更尖、更密
+      this.noise(0.30, 0.028, 3400);
+      this.tone(178, 0.42, 'sawtooth', 0.016, 172);
+      const n = 10, gap = Math.max(90, (ms || 2000) / n);
+      for (let i = 0; i < n; i++) {
+        setTimeout(() => { this.noise(0.040, 0.014, 2400); this.tone(96, 0.09, 'square', 0.010, 84); }, i * gap);
+      }
+    },
     ambient(on) {
       if (!this.ready) return;
       if (on && !this.amb) {
@@ -265,7 +275,14 @@
   let camTheta = -0.16, camPhi = 0.94, camRadius = 17.5;
   let autoSpin = true, lastInteract = 0;
   let equipMeshes = {};
-  let anim = { drill: 0, drillDur: 1600, lathe: 0, latheDur: 1500, weld: 0, weldDur: 1500 };
+  let anim = {
+    drill: 0, drillDur: 1600, lathe: 0, latheDur: 1500, weld: 0, weldDur: 1500,
+    scope: 0, scopeDur: 1500,     // 示波器：波形活跃
+    cnc: 0, cncDur: 2000,         // 数控：主轴/工作台/火花
+    cab: 0, cabDur: 2000,         // 控制柜配线：导线逐根接上
+    cad: 0, cadDur: 2000          // 绘图工作站：屏幕上一根根画线
+  };
+  let stations = {};              // 非设备类工位（控制柜 / 绘图桌），由 buildScene 填充
   let lastT = 0;
   let camTarget = null;   // 开发用：把镜头钉在某台设备上
   let qualityLevel = 2;
@@ -640,8 +657,12 @@
     drill:   [ 1.62, -2.95, -0.30],
     welder:  [ 2.62, -1.55, 0.85],
     printer: [ 3.30,  3.55, 0.55],
-    scope:   [ 2.05,  3.85, -0.55],
-    cnc:     [-2.60,  4.30, 0.15]
+    // 房间范围是 x∈[-3.9,3.9]、z∈[-4.6,3.6]，超出 z=3.6 的设备等于站在相机背后，
+    // 永远不可能被看见（示波器原来在 z=3.85、数控在 z=4.30，全在墙外）。
+    scope:   [-3.28, -3.58, 0.42],     // 电子仪器：挪到后墙左侧、控制柜旁边（电工活就在这里做）
+    // 数控必须背靠左墙、门朝房间：它深 2m，若门朝前墙，前方只剩 0.7m，
+    // 镜头会被墙夹到贴着玻璃门（试拍过一次，整帧都是门）
+    cnc:     [-3.00,  1.60, Math.PI / 2]
   };
   const WOOD_BENCH = { x: 2.18, z: 1.18, ry: -0.42 };
   // 木工房的镜头：低机位、走近看，像参考图那样三台机器占满画面
@@ -1536,39 +1557,373 @@
     return g;
   }
 
+  /* 示波器屏幕：一张会重绘的 canvas。
+     待机时是一条几乎平直的基线，干活时才有波形扫过 —— 屏幕上没东西的示波器等于关机 */
+  function oscScreen() {
+    const cv = document.createElement('canvas');
+    cv.width = 512; cv.height = 320;
+    const cx = cv.getContext('2d');
+    const tex = new T.CanvasTexture(cv);
+    tex.colorSpace = T.SRGBColorSpace;
+    return { cv, cx, tex };
+  }
+
   function modelScope() {
     const g = new T.Group();
-    g.add(box(0.9, 0.5, 0.6, MAT.steelDark, 0, 0.72, 0));
-    g.add(box(0.78, 0.42, 0.02, MAT.black, 0, 0.8, 0.31));
-    g.add(box(0.62, 0.32, 0.01, MAT.cy, 0, 0.8, 0.33));
+    // 机身加宽加高：原尺寸 0.9×0.5 在全景机位下只有几十像素，屏幕里画什么都看不见
+    g.add(box(1.16, 0.68, 0.62, MAT.steelDark, 0, 0.90, 0));
+    g.add(box(1.08, 0.60, 0.02, MAT.black, 0, 0.92, 0.315));
+    // 屏幕：canvas 贴图 + 自发光，配合 bloom 会有一层轻微光晕
+    const sc = oscScreen();
+    const scrMat = new T.MeshBasicMaterial({ map: sc.tex, toneMapped: false });
+    const scr = box(0.66, 0.40, 0.012, MAT.black, -0.17, 0.98, 0.330);
+    scr.material = scrMat;
+    g.add(scr);
+    // 屏幕四周的深色压边（canvas 本身有底，但边缘需要一道实体框才不像贴纸）
+    g.add(box(0.70, 0.012, 0.016, MAT.black, -0.17, 1.185, 0.334));
+    g.add(box(0.70, 0.012, 0.016, MAT.black, -0.17, 0.775, 0.334));
+    // 右侧按键列 + 三个旋钮
+    for (let i = 0; i < 5; i++) {
+      g.add(box(0.10, 0.028, 0.014, i === 0 ? MAT.ye : MAT.steel, 0.42, 1.12 - i * 0.052, 0.336));
+    }
+    const knobs = [];
+    [0.83, 0.86].forEach((y, i) => {
+      const k = cyl(0.036, 0.036, 0.026, MAT.steel, 0.42 + i * 0.10, y, 0.345, 14);
+      k.rotation.x = Math.PI / 2;
+      g.add(k); knobs.push(k);
+    });
+    // 电源指示灯（干活时更亮）
+    const ledMat = new T.MeshStandardMaterial({ color: 0x0a1a10, emissive: 0x35ff9a, emissiveIntensity: 0.9 });
+    g.add(box(0.026, 0.026, 0.014, MAT.mg, 0.30, 0.70, 0.336));
+    const led = box(0.024, 0.024, 0.012, MAT.mg, 0.53, 0.70, 0.338);
+    led.material = ledMat; g.add(led);
     // 桌面腿
-    g.add(box(0.06, 0.48, 0.06, MAT.steel, -0.3, 0.24, -0.2));
-    g.add(box(0.06, 0.48, 0.06, MAT.steel, 0.3, 0.24, -0.2));
-    // 探头
-    const pr = cyl(0.03, 0.03, 0.5, MAT.black, 0.5, 0.55, 0.2);
-    pr.rotation.z = 0.4; g.add(pr);
-    g.add(box(0.2, 0.03, 0.16, MAT.ye, 0.02, 0.98, 0));
+    g.add(box(0.07, 0.58, 0.07, MAT.steel, -0.42, 0.29, -0.22));
+    g.add(box(0.07, 0.58, 0.07, MAT.steel, 0.42, 0.29, -0.22));
+    g.add(box(0.94, 0.04, 0.50, MAT.steelDark, 0, 0.56, 0));
+    // 探头：从机顶垂下来夹在桌上的小板上（被测件，波形才有来由）
+    g.add(box(0.30, 0.05, 0.24, MAT.steelDark, 0.05, 1.27, 0.06));
+    const pr = new T.Group();
+    pr.position.set(0.05, 1.30, 0.30);
+    pr.add(cyl(0.030, 0.024, 0.60, MAT.black, 0, 0.02, 0, 12));
+    pr.rotation.z = 0.30; pr.rotation.x = -0.28;
+    g.add(pr);
+    g.add(box(0.22, 0.018, 0.16, MAT.ye, 0.05, 1.26, 0.30));   // 被测小板
+
+    g.userData.screen = sc;          // { cv, cx, tex }
+    g.userData.knobs = knobs;
+    g.userData.ledMat = ledMat;
+    g.userData.scrT = 0;
     return g;
+  }
+
+  /* 数控面板屏幕：坐标数字 + 程序行 + 进度条 */
+  function cncScreen() {
+    const cv = document.createElement('canvas');
+    cv.width = 384; cv.height = 256;
+    const cx = cv.getContext('2d');
+    const tex = new T.CanvasTexture(cv);
+    tex.colorSpace = T.SRGBColorSpace;
+    return { cv, cx, tex };
   }
 
   function modelCnc() {
     const g = new T.Group();
-    g.add(box(2.2, 1.9, 2.0, MAT.steelDark, 0, 0.95, 0));
-    g.add(box(2.0, 1.5, 0.06, MAT.glass, 0, 1.05, 1.02));
-    g.add(box(2.24, 0.1, 2.04, MAT.paint, 0, 1.92, 0));
-    // 门框霓虹
-    g.add(box(2.05, 0.05, 0.05, MAT.cy, 0, 1.82, 1.05));
-    // 内部亮光
-    const inner = box(1.6, 0.06, 1.4, MAT.white, 0, 1.78, 0);
-    g.add(inner);
-    // 控制面板
-    g.add(box(0.7, 0.5, 0.06, MAT.black, 0.6, 1.35, 1.06));
-    g.add(box(0.4, 0.26, 0.02, MAT.cy, 0.6, 1.38, 1.1));
-    // 按钮
-    for (let i = 0; i < 5; i++) {
-      const b = cyl(0.03, 0.03, 0.03, i === 0 ? MAT.mg : MAT.steel, 0.42 + i * 0.09, 1.16, 1.1, 10);
-      b.rotation.x = Math.PI / 2; g.add(b);
+    const W = 2.2, D = 2.0;
+    const BED = 0.62;                 // 底座台肩高度 = 内腔底面
+    const TOP = 1.86;                 // 内腔顶
+    const IN = TOP - BED;
+
+    /* ---------- 底座（电气柜，实心）---------- */
+    g.add(box(W, BED, D, MAT.steelDark, 0, BED / 2, 0));
+    g.add(box(W + 0.06, 0.06, D + 0.06, MAT.paint, 0, BED + 0.01, 0));
+    g.add(box(W - 0.10, 0.34, 0.02, MAT.black, 0, 0.36, D / 2 + 0.005));      // 柜门
+    for (let i = 0; i < 4; i++) g.add(box(0.16, 0.012, 0.008, MAT.steel, -0.7, 0.48 - i * 0.06, D / 2 + 0.02));
+
+    /* ---------- 外壳：左右侧壁 + 后壁 + 顶盖（中空，才能看见里面在加工）---------- */
+    const t = 0.10;
+    [-1, 1].forEach((s) => g.add(box(t, IN, D, MAT.steelDark, s * (W / 2 - t / 2), BED + IN / 2, 0)));
+    g.add(box(W, IN, t, MAT.steelDark, 0, BED + IN / 2, -D / 2 + t / 2));
+    g.add(box(W + 0.04, 0.10, D + 0.04, MAT.paint, 0, TOP + 0.05, 0));
+
+    /* ---------- 内腔：亮色衬板 + 顶灯（加工区必须比外壳亮，否则一片黑）---------- */
+    const cavMat = new T.MeshStandardMaterial({ color: 0x8b9196, metalness: 0.40, roughness: 0.60 });
+    g.add(box(W - 2 * t, IN - 0.02, 0.02, cavMat, 0, BED + IN / 2, -D / 2 + t + 0.01));
+    [-1, 1].forEach((s) => g.add(box(0.02, IN - 0.02, D - 2 * t, cavMat, s * (W / 2 - t - 0.01), BED + IN / 2, 0)));
+    g.add(box(W - 2 * t, 0.02, D - 2 * t, cavMat, 0, BED + 0.02, 0));         // 腔底
+    const cavLampMat = new T.MeshStandardMaterial({ color: 0x6b6a60, emissive: 0xfff0d0, emissiveIntensity: 0.7 });
+    [-0.55, 0.55].forEach((x) => g.add(box(0.42, 0.03, 0.36, cavMat, x, TOP - 0.06, 0.1)));
+    const cavLamp = box(0.36, 0.02, 0.30, cavMat, 0, TOP - 0.08, 0.35);
+    cavLamp.material = cavLampMat; g.add(cavLamp);
+    // 只让灯条"自己发亮"照不亮内腔（emissive 只作用于自身），
+    // 必须再加一盏真实的点光，工作台、主轴、工件才看得见
+    const cavLight = new T.PointLight(0xffe9c8, 0, 2.4, 2);
+    cavLight.position.set(0, TOP - 0.18, 0.20);
+    g.add(cavLight);
+
+    /* ---------- 工作台：沿 X 移动，台面上夹工件 ---------- */
+    const table = new T.Group();
+    table.position.set(0, BED + 0.20, 0.06);
+    table.add(box(1.00, 0.09, 0.92, MAT.steel, 0, 0, 0));                     // 台面
+    table.add(box(0.94, 0.05, 0.86, MAT.steelDark, 0, -0.07, 0));             // 台座
+    for (let i = 0; i < 5; i++) {                                             // T 型槽
+      table.add(box(0.86, 0.008, 0.020, MAT.black, 0, 0.048, -0.32 + i * 0.16));
     }
+    // 工件：铝块 + 已铣出的台阶（看得出在加工什么）
+    table.add(box(0.34, 0.14, 0.26, MAT.mach || MAT.steel, 0.02, 0.12, 0));
+    table.add(box(0.16, 0.05, 0.26, MAT.steelDark, 0.11, 0.165, 0));
+    // 台钳压板
+    [-0.24, 0.28].forEach((x) => table.add(box(0.05, 0.14, 0.30, MAT.steelDark, x, 0.10, 0)));
+    g.add(table);
+
+    /* ---------- 主轴头：沿 Z 微动，主轴自转，刀柄在最下方 ---------- */
+    const head = new T.Group();
+    head.position.set(0, 0, -0.22);
+    head.add(box(0.44, 0.52, 0.46, MAT.steelDark, 0, 1.42, 0));               // 主轴箱
+    head.add(box(0.46, 0.06, 0.48, MAT.paint, 0, 1.70, 0));                   // 顶盖
+    const spindle = new T.Group();
+    spindle.position.set(0, 1.45, 0);
+    spindle.add(cyl(0.075, 0.075, 0.30, MAT.steel, 0, 0, 0, 16));             // 主轴套
+    spindle.add(cyl(0.055, 0.055, 0.10, MAT.steel, 0, -0.19, 0, 16));
+    // 刀柄：立铣刀，带两条螺旋槽（自转时看得出来在转）
+    spindle.add(cyl(0.026, 0.026, 0.16, MAT.steel, 0, -0.31, 0, 12));
+    [-1, 1].forEach((s) => {
+      const f = box(0.008, 0.15, 0.008, MAT.black, s * 0.024, -0.31, 0.006);
+      spindle.add(f);
+    });
+    spindle.add(cyl(0.030, 0.018, 0.03, MAT.steel, 0, -0.40, 0, 12));         // 刀尖
+    head.add(spindle);
+    g.add(head);
+
+    /* ---------- 前门：两扇玻璃推拉门（半透明，能看进去）---------- */
+    [-1, 1].forEach((s) => {
+      const dr = box(0.98, IN - 0.06, 0.02, MAT.glass, s * 0.52, BED + IN / 2, D / 2 - 0.06);
+      g.add(dr);
+      g.add(box(0.05, IN - 0.04, 0.035, MAT.steelDark, s * 1.01, BED + IN / 2, D / 2 - 0.06));  // 门框
+      g.add(box(0.10, 0.05, 0.045, MAT.steel, s * 0.10, BED + IN / 2, D / 2 - 0.05));           // 拉手
+    });
+    g.add(box(W - 0.1, 0.05, 0.04, MAT.steelDark, 0, TOP - 0.02, D / 2 - 0.05));
+    // 门框霓虹（原来是机身前面一条，位置保留）
+    g.add(box(2.05, 0.035, 0.03, MAT.cy, 0, TOP - 0.05, D / 2 + 0.005));
+
+    /* ---------- 控制面板：canvas 屏幕 + 按键 + 三色塔灯 ---------- */
+    // 悬臂操作面板：真实数控的操作面板都是从机身右上角伸出来的，
+    // 挂在门面上会挡住工作区、贴在玻璃上也不合理。
+    // ⚠️ 这块面板原来建好了 Group 却**从未 g.add(panel)**，等于不在场景里，
+    //    之前两次"挪位置"都白挪 —— 加任何东西进 g 之前务必确认最后 add 了。
+    const panel = new T.Group();
+    panel.position.set(0.92, 1.20, 1.16);      // 凸出门面 0.14m，悬在右前方
+    panel.rotation.y = -0.14;
+    // 悬臂：竖杆从机顶下来 + 横杆伸到面板背面
+    g.add(box(0.045, TOP - 1.34, 0.045, MAT.steelDark, 1.02, (TOP + 1.34) / 2, 1.00));
+    g.add(box(0.045, 0.045, 0.22, MAT.steelDark, 1.02, 1.36, 1.09));
+    g.add(box(0.05, 0.10, 0.05, MAT.steelDark, 0.96, 1.36, 1.18));   // 面板背面的转座
+    panel.add(box(0.52, 0.44, 0.06, MAT.black, 0, 0, 0));
+    const cs = cncScreen();
+    const csMat = new T.MeshBasicMaterial({ map: cs.tex, toneMapped: false });
+    const csMesh = box(0.34, 0.24, 0.012, MAT.black, 0, 0.05, 0.036);
+    csMesh.material = csMat;
+    panel.add(csMesh);
+    for (let i = 0; i < 6; i++) {
+      panel.add(box(0.05, 0.035, 0.02, i === 0 ? MAT.mg : MAT.steel, -0.13 + i * 0.052, -0.145, 0.036));
+    }
+    g.add(panel);                                  // ← 缺这一行面板就不在场景里
+    // 塔灯：红/黄/绿三段，加工时绿闪
+    const tower = new T.Group();
+    tower.position.set(-1.02, TOP + 0.10, 0.80);
+    tower.add(cyl(0.010, 0.010, 0.26, MAT.steel, 0, 0.13, 0, 8));
+    const lampMat = (c) => new T.MeshStandardMaterial({ color: 0x101010, emissive: c, emissiveIntensity: 0.25 });
+    const lampG = lampMat(0x2bff8a), lampY = lampMat(0xffc21e), lampR = lampMat(0xff3b30);
+    const lg1 = cyl(0.045, 0.045, 0.10, MAT.black, 0, 0.31, 0, 14); lg1.material = lampG; tower.add(lg1);
+    const ly1 = cyl(0.045, 0.045, 0.10, MAT.black, 0, 0.42, 0, 14); ly1.material = lampY; tower.add(ly1);
+    const lr1 = cyl(0.045, 0.045, 0.10, MAT.black, 0, 0.53, 0, 14); lr1.material = lampR; tower.add(lr1);
+    tower.add(cyl(0.048, 0.048, 0.02, MAT.black, 0, 0.585, 0, 14));
+    g.add(tower);
+
+    /* ---------- 切削火花（加工时从刀尖甩出，落到工作台）---------- */
+    const sparks = [];
+    const sparkMat = new T.MeshBasicMaterial({ color: 0xffd08a });
+    for (let i = 0; i < 22; i++) {
+      const s = new T.Mesh(new T.BoxGeometry(0.016, 0.016, 0.016), sparkMat);
+      s.visible = false;
+      s.userData = { v: new T.Vector3(), life: 0 };
+      g.add(s); sparks.push(s);
+    }
+
+    g.userData.table = table;
+    g.userData.head = head;
+    g.userData.spindle = spindle;
+    g.userData.cavLamp = cavLampMat;
+    g.userData.cavLight = cavLight;
+    g.userData.screen = cs;
+    g.userData.lampG = lampG; g.userData.lampY = lampY;
+    g.userData.sparks = sparks;
+    g.userData.sparkT = 0;
+    g.userData.headZ = -0.22;
+    g.userData.scrT = 0;
+    g.userData.sparkFloor = BED + 0.26;
+    return g;
+  }
+
+  /* ============================================================
+     控制柜（电工工位）：柜门敞开，内部是导轨、断路器、端子排；
+     配线时导线一根根接上去 —— 静态摆一柜子线看着像道具，逐根出现才像"在干活"
+     ============================================================ */
+  function modelCabinet() {
+    const g = new T.Group();
+    const W = 1.04, H = 1.86, D = 0.34;      // 柜体（挂墙式，比落地柜薄）
+    const bodyMat = new T.MeshStandardMaterial({ color: 0x8d9196, metalness: 0.55, roughness: 0.48 });
+    const innerMat = new T.MeshStandardMaterial({ color: 0xb9bcbe, metalness: 0.35, roughness: 0.62 });
+    const railMat = new T.MeshStandardMaterial({ color: 0xcfd2d4, metalness: 0.78, roughness: 0.30 });
+
+    // 柜体：背板 + 四周框（前面敞开，能看见内部）
+    g.add(box(W, H, 0.02, bodyMat, 0, H / 2, -D / 2));
+    g.add(box(0.03, H, D, bodyMat, -W / 2 + 0.015, H / 2, 0));
+    g.add(box(0.03, H, D, bodyMat, W / 2 - 0.015, H / 2, 0));
+    g.add(box(W, 0.03, D, bodyMat, 0, H - 0.015, 0));
+    g.add(box(W, 0.03, D, bodyMat, 0, 0.015, 0));
+    // 内部衬板（浅灰，让深色导线有对比）
+    g.add(box(W - 0.07, H - 0.07, 0.012, innerMat, 0, H / 2, -D / 2 + 0.018));
+
+    // 三条 DIN 导轨 + 断路器
+    const wiresAt = [];                       // 导线端点（上端接断路器，下端接端子排）
+    [1.44, 1.06, 0.68].forEach((y, row) => {
+      g.add(box(W - 0.13, 0.035, 0.035, railMat, 0, y, -0.10));
+      const n = 6;
+      for (let i = 0; i < n; i++) {
+        const x = -0.40 + i * 0.16;
+        g.add(box(0.055, 0.13, 0.09, MAT.steelDark, x, y + 0.075, -0.115));       // 断路器本体
+        g.add(box(0.030, 0.030, 0.022, MAT.black, x, y + 0.095, -0.055));         // 拨钮
+        wiresAt.push(new T.Vector3(x, y + 0.02, -0.075));
+      }
+      // 行标签
+      g.add(box(0.10, 0.028, 0.010, MAT.paper, -0.44, y + 0.16, -0.170));
+    });
+    // 端子排（柜下部）+ 两排接线孔
+    [0.36, 0.26].forEach((y) => {
+      g.add(box(W - 0.15, 0.045, 0.075, railMat, 0, y, -0.08));
+      for (let i = 0; i < 9; i++) {
+        g.add(box(0.022, 0.020, 0.024, MAT.steel, -0.42 + i * 0.105, y + 0.020, -0.055));
+      }
+    });
+    // 线槽（两条竖向灰色槽，真实柜里导线都走槽）
+    [-0.16, 0.16].forEach((x) => {
+      g.add(box(0.075, 1.20, 0.03, new T.MeshStandardMaterial({ color: 0xa8a49c, roughness: 0.75 }), x, 1.02, -0.135));
+    });
+    // 进线孔 + 底部线缆（从柜底引到地面）
+    g.add(box(0.12, 0.02, 0.08, MAT.black, 0.30, 0.026, -0.06));
+    const feed = new T.Mesh(new T.TubeGeometry(new T.CatmullRomCurve3([
+      new T.Vector3(0.30, 0.02, -0.06), new T.Vector3(0.34, -0.30, 0.02),
+      new T.Vector3(0.42, -0.88, 0.10), new T.Vector3(0.52, -1.86, 0.16)
+    ]), 24, 0.022, 6, false), MAT.black);
+    feed.castShadow = true; g.add(feed);
+    // 柜顶信号灯 + 铭牌
+    const sigMat = new T.MeshStandardMaterial({ color: 0x101010, emissive: 0x35ff9a, emissiveIntensity: 0.3 });
+    const sig = cyl(0.035, 0.035, 0.06, MAT.black, 0.36, H + 0.04, 0, 12);
+    sig.material = sigMat; g.add(sig);
+    g.add(cyl(0.012, 0.012, 0.03, MAT.steel, 0.36, H + 0.01, 0, 8));
+    g.add(box(0.30, 0.075, 0.008, MAT.paper, -0.20, H - 0.10, -D / 2 + 0.030));
+
+    // 柜门：开着的左门（露出内部），门上有小窗和把手
+    const door = new T.Group();
+    door.position.set(-W / 2, 0, 0);
+    door.rotation.y = -1.62;                  // 约 93°，向外敞开
+    door.add(box(0.50, H - 0.05, 0.022, bodyMat, -0.25, H / 2, 0));
+    door.add(box(0.34, 0.42, 0.010, MAT.glass, -0.25, H / 2 + 0.08, 0.016));
+    door.add(box(0.030, 0.10, 0.030, MAT.steel, -0.46, H / 2 - 0.05, 0.028));
+    g.add(door);
+
+    /* ---------- 导线束：默认全部隐藏，配线时按进度逐根出现 ---------- */
+    const wireCols = [0x2f6dd0, 0xd0452f, 0x1f2a33, 0xc9a227, 0x2f9e5c, 0x7a3fbf];
+    const wires = [];
+    wiresAt.forEach((end, i) => {
+      // 起点：底部端子排孔位；终点：第 i 个断路器下端
+      const sx = -0.42 + (i % 9) * 0.105;
+      const sy = i < 9 ? 0.36 : 0.26;
+      const slotX = (sx < 0 ? -0.16 : 0.16);            // 走最近的竖线槽
+      const pts = [
+        new T.Vector3(sx, sy + 0.02, -0.055),
+        new T.Vector3(sx + (slotX - sx) * 0.35, sy + 0.10, -0.075),
+        new T.Vector3(slotX, sy + 0.34, -0.085),
+        new T.Vector3(slotX, end.y - 0.30, -0.085),
+        new T.Vector3(slotX + (end.x - slotX) * 0.45, end.y - 0.08, -0.080),
+        new T.Vector3(end.x, end.y, -0.075)
+      ];
+      const curve = new T.CatmullRomCurve3(pts);
+      const m = new T.Mesh(
+        new T.TubeGeometry(curve, 30, 0.0062, 5, false),
+        new T.MeshStandardMaterial({ color: wireCols[i % wireCols.length], roughness: 0.55, metalness: 0.05 })
+      );
+      m.visible = false;
+      g.add(m);
+      wires.push(m);
+    });
+
+    g.userData.wires = wires;
+    g.userData.sigMat = sigMat;
+    g.userData.wireShown = 0;
+    return g;
+  }
+
+  /* CAD 屏幕：320×200，出图时按进度逐段画出夹具轮廓 */
+  function cadScreen() {
+    const cv = document.createElement('canvas');
+    cv.width = 320; cv.height = 200;
+    const cx = cv.getContext('2d');
+    const tex = new T.CanvasTexture(cv);
+    tex.colorSpace = T.SRGBColorSpace;
+    return { cv, cx, tex };
+  }
+
+  /* ============================================================
+     绘图工作站（机械设计工位）：屏幕上是 CAD 界面，出图时一条条画出来
+     ============================================================ */
+  function modelCadDesk() {
+    const g = new T.Group();
+    const TH = 0.74;                                   // 桌面高
+    const deskMat = new T.MeshStandardMaterial({ color: 0x8a7d68, metalness: 0.10, roughness: 0.72 });
+    const darkMat = new T.MeshStandardMaterial({ color: 0x23282e, metalness: 0.45, roughness: 0.52 });
+
+    // 桌面 + 四条腿 + 抽屉
+    g.add(box(1.36, 0.05, 0.70, deskMat, 0, TH, 0));
+    [[-0.62, -0.28], [0.62, -0.28], [-0.62, 0.28], [0.62, 0.28]].forEach(([a, b]) => {
+      g.add(box(0.055, TH, 0.055, darkMat, a, TH / 2, b));
+    });
+    g.add(box(1.24, 0.05, 0.05, darkMat, 0, 0.22, -0.28));
+    g.add(box(0.52, 0.20, 0.60, deskMat, -0.38, TH - 0.15, 0));      // 抽屉体
+    [-0.06, 0.06].forEach((dx) => g.add(box(0.20, 0.012, 0.012, MAT.steel, -0.38 + dx * 2, TH - 0.10, 0.30)));
+
+    // 显示器：底座 + 立柱 + 屏
+    g.add(box(0.34, 0.020, 0.20, darkMat, 0, TH + 0.035, -0.10));
+    g.add(box(0.05, 0.26, 0.05, MAT.steel, 0, TH + 0.16, -0.10));
+    const mon = new T.Group();
+    mon.position.set(0, TH + 0.40, -0.06);
+    mon.rotation.x = -0.10;
+    mon.add(box(0.78, 0.46, 0.030, darkMat, 0, 0, 0));                  // 边框
+    const cad = cadScreen();
+    const cadMat = new T.MeshBasicMaterial({ map: cad.tex, toneMapped: false });
+    const cadMesh = box(0.74, 0.42, 0.008, MAT.black, 0, 0.005, 0.020);
+    cadMesh.material = cadMat;
+    mon.add(cadMesh);
+    mon.add(box(0.06, 0.014, 0.010, MAT.cy, 0, -0.215, 0.026));         // 电源灯
+    g.add(mon);
+
+    // 键盘 + 鼠标 + 数位板（设计工位常见）
+    g.add(box(0.44, 0.022, 0.15, darkMat, -0.02, TH + 0.036, 0.22));
+    for (let r = 0; r < 4; r++) g.add(box(0.40, 0.004, 0.012, MAT.steel, -0.02, TH + 0.050, 0.18 + r * 0.026));
+    g.add(box(0.065, 0.026, 0.10, darkMat, 0.28, TH + 0.040, 0.22));
+    g.add(box(0.26, 0.010, 0.20, darkMat, 0.44, TH + 0.032, 0.02));
+    // 主机（桌下）
+    g.add(box(0.24, 0.46, 0.46, darkMat, 0.50, 0.25, 0.02));
+    g.add(cyl(0.030, 0.030, 0.010, MAT.cy, 0.50, 0.42, 0.24, 12));
+    // 桌上一卷图纸 + 卡尺（体现这是设计桌，不只是一台电脑）
+    const roll = cyl(0.045, 0.045, 0.42, MAT.paper, -0.48, TH + 0.075, 0.18, 14);
+    roll.rotation.z = Math.PI / 2; g.add(roll);
+    g.add(box(0.26, 0.008, 0.030, MAT.steel, 0.12, TH + 0.030, -0.26));
+
+    g.userData.screen = cad;
+    g.userData.scrT = 0;
+    g.userData.cadProg = 0;
     return g;
   }
 
@@ -2698,6 +3053,24 @@
       scene.add(cyl(0.055, 0.055, 0.03, MAT.ye, x, 4.11, 1.4));
     });
 
+    // ---- 非设备类工位：控制柜（电工）、绘图桌（机械设计）----
+    // 这两样不是可买的设备，而是"接到这类活就在这里发生"的固定工位，所以贴在画面内的后墙一侧
+    stations = {};
+    (function placeStations() {
+      const list = [
+        { id: 'cab', build: modelCabinet, pos: [-2.20, 0, -4.06], rot: 0 },
+        { id: 'cad', build: modelCadDesk, pos: [-0.85, 0, -3.92], rot: 0 }
+      ];
+      list.forEach((s) => {
+        const h = s.build();
+        h.position.set(s.pos[0], s.pos[1], s.pos[2]);
+        h.rotation.y = s.rot || 0;
+        h.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+        scene.add(h);
+        stations[s.id] = h;
+      });
+    })();
+
     // ---- 设备 / 空位 ----
     EQUIP_DEF.forEach((def) => {
       const holder = new T.Group();
@@ -3084,11 +3457,238 @@
     s.scale.setScalar(0.55 + Math.random() * 0.85);
   }
 
+  /* ============================================================
+     三块屏幕的 2D 绘制。都是"画在 canvas 上、贴到屏幕上"，
+     每块按 55~70ms 节流重绘 —— 每帧重绘三张 512×320 的 canvas 没必要，也吃性能
+     ============================================================ */
+
+  // 示波器：待机一条平直底噪线，干活时才有波形扫过
+  function drawOsc(ud, on, t) {
+    const sc = ud.screen;
+    const cx = sc.cx, W = sc.cv.width, H = sc.cv.height;
+    cx.fillStyle = '#04140e'; cx.fillRect(0, 0, W, H);
+    // 网格
+    cx.strokeStyle = 'rgba(60,220,140,.16)'; cx.lineWidth = 1;
+    for (let i = 1; i < 10; i++) {
+      cx.beginPath(); cx.moveTo(i * W / 10, 0); cx.lineTo(i * W / 10, H); cx.stroke();
+    }
+    for (let j = 1; j < 8; j++) {
+      cx.beginPath(); cx.moveTo(0, j * H / 8); cx.lineTo(W, j * H / 8); cx.stroke();
+    }
+    // 中心轴
+    cx.strokeStyle = 'rgba(60,220,140,.38)';
+    cx.beginPath(); cx.moveTo(0, H * 0.52); cx.lineTo(W, H * 0.52); cx.stroke();
+    // 刻度
+    cx.fillStyle = 'rgba(90,235,160,.55)'; cx.font = '11px monospace';
+    for (let i = 0; i < 10; i += 2) cx.fillText((i / 2).toFixed(0), i * W / 10 + 4, H - 8);
+
+    // 波形：两个不同频率叠加，干活时幅度大且有抖动
+    const amp = on ? 58 : 4;
+    const fq = on ? 2.6 : 1.4;
+    cx.beginPath();
+    for (let x = 0; x <= W; x += 2) {
+      const u = x / W;
+      let y = H * 0.52
+        - Math.sin(u * Math.PI * 2 * fq + t * 0.0062) * amp
+        - Math.sin(u * Math.PI * 2 * fq * 2.7 + t * 0.0093) * amp * 0.26;
+      if (on) y += (Math.random() - 0.5) * 5;
+      if (x === 0) cx.moveTo(x, y); else cx.lineTo(x, y);
+    }
+    cx.strokeStyle = '#5cffb0'; cx.lineWidth = 2.2;
+    cx.shadowColor = '#5cffb0'; cx.shadowBlur = on ? 9 : 4;
+    cx.stroke();
+    cx.shadowBlur = 0;
+
+    // 文字读数
+    cx.fillStyle = 'rgba(130,255,200,.92)'; cx.font = 'bold 15px monospace';
+    cx.fillText('CH1  500mV/div', 12, 22);
+    cx.font = '15px monospace';
+    cx.fillStyle = on ? 'rgba(255,235,120,.95)' : 'rgba(120,170,150,.55)';
+    cx.fillText(on ? '1.06 kHz' : '--- kHz', W - 108, 22);
+    if (on) {
+      cx.fillStyle = 'rgba(60,220,140,.85)';
+      cx.font = '13px monospace';
+      cx.fillText('TRIG AUTO', W - 108, H - 12);
+    }
+    sc.tex.needsUpdate = true;
+  }
+
+  // 数控面板：坐标数字跟着工作台动，程序段滚动，底部进度条
+  function drawCnc(ud, on, t, p) {
+    const sc = ud.screen;
+    const cx = sc.cx, W = sc.cv.width, H = sc.cv.height;
+    cx.fillStyle = '#07131c'; cx.fillRect(0, 0, W, H);
+    cx.fillStyle = on ? '#37d8ff' : '#2b6a80';
+    cx.fillRect(0, 0, W, 26);
+    cx.fillStyle = '#04121a'; cx.font = 'bold 15px monospace';
+    cx.fillText(on ? 'RUNNING' : 'IDLE', 10, 18);
+    cx.textAlign = 'right';
+    cx.fillText(on ? 'S2400  F600' : 'S0  F0', W - 10, 18);
+    cx.textAlign = 'left';
+
+    const x = on ? (Math.sin(p * Math.PI * 6) * 42.5) : 0;
+    const z = on ? (Math.cos(p * Math.PI * 4) * 18.2) : 0;
+    const y = on ? -(18 + Math.sin(p * Math.PI * 12) * 4.5) : 0;
+    cx.font = '17px monospace';
+    const rows = [
+      ['X', (x).toFixed(3) + ' mm'],
+      ['Y', (y).toFixed(3) + ' mm'],
+      ['Z', (z).toFixed(3) + ' mm']
+    ];
+    rows.forEach((r, i) => {
+      cx.fillStyle = 'rgba(90,200,230,.65)';
+      cx.fillText(r[0], 14, 56 + i * 26);
+      cx.fillStyle = '#baf0ff';
+      cx.fillText(r[1], 42, 56 + i * 26);
+    });
+    // 程序段
+    const prog = ['G54 G90 G17', 'G01 Z-2.0 F600', 'G02 X20. Y0 R10.', 'M08', 'G00 Z5.0'];
+    const idx = on ? Math.floor(p * prog.length * 3) % prog.length : 0;
+    cx.font = '14px monospace';
+    for (let i = 0; i < 3; i++) {
+      const line = prog[(idx + i) % prog.length];
+      cx.fillStyle = i === 0 ? '#ffd166' : 'rgba(120,170,190,.55)';
+      cx.fillText(line, 14, 148 + i * 20);
+    }
+    // 进度条
+    cx.strokeStyle = 'rgba(90,200,230,.45)'; cx.lineWidth = 1;
+    cx.strokeRect(14, H - 26, W - 28, 14);
+    cx.fillStyle = on ? '#37d8ff' : 'rgba(55,216,255,.25)';
+    cx.fillRect(15, H - 25, (W - 30) * (on ? clamp(p, 0, 1) : 0), 12);
+
+    sc.tex.needsUpdate = true;
+  }
+
+  // CAD：按进度一笔一笔画出定位夹具的图（外框 → 孔 → 中心线 → 尺寸 → 标注）
+  function drawCad(ud, t) {
+    const sc = ud.screen;
+    const cx = sc.cx, W = sc.cv.width, H = sc.cv.height;
+    const pr = ud.cadProg || 0;
+    cx.fillStyle = '#0b0f14'; cx.fillRect(0, 0, W, H);
+    // 点阵网格
+    cx.fillStyle = 'rgba(80,110,130,.20)';
+    for (let gx = 10; gx < W; gx += 16) for (let gy = 30; gy < H; gy += 16) cx.fillRect(gx, gy, 1, 1);
+    // 顶部工具条
+    cx.fillStyle = '#151c24'; cx.fillRect(0, 0, W, 18);
+    cx.fillStyle = '#7fd6ff'; cx.font = 'bold 11px monospace';
+    cx.fillText('FIXTURE-01.DWG', 8, 13);
+    cx.fillStyle = 'rgba(150,180,200,.6)';
+    cx.textAlign = 'right'; cx.fillText('1:1   A3', W - 8, 13); cx.textAlign = 'left';
+
+    const L = 46, T = 44, R = 274, B = 158;      // 夹具外框
+    // 分段：共 6 段，按进度逐段出现
+    const step = pr * 6;
+    const seg = (n, fn) => { if (step > n) fn(clamp(step - n, 0, 1)); };
+
+    const lw = 1.7;
+    cx.lineWidth = lw; cx.strokeStyle = '#8fd8ff';
+    cx.shadowColor = '#4aa8d8'; cx.shadowBlur = 3;
+
+    // ① 外框（四条边依次画出）
+    seg(0, (k) => {
+      const per = [[L, T, R, T], [R, T, R, B], [R, B, L, B], [L, B, L, T]];
+      cx.beginPath();
+      per.forEach((e, i) => {
+        const kk = clamp(k * 4 - i, 0, 1);
+        if (kk <= 0) return;
+        cx.moveTo(e[0], e[1]);
+        cx.lineTo(e[0] + (e[2] - e[0]) * kk, e[1] + (e[3] - e[1]) * kk);
+      });
+      cx.stroke();
+    });
+    // ② 两个定位圆孔
+    seg(1, (k) => {
+      [[96, 101], [224, 101]].forEach(([hx, hy], i) => {
+        const kk = clamp(k * 2 - i, 0, 1);
+        if (kk <= 0) return;
+        cx.beginPath();
+        cx.arc(hx, hy, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * kk);
+        cx.stroke();
+      });
+    });
+    // ③ 中心线（点划线）
+    seg(2, (k) => {
+      cx.save();
+      cx.setLineDash([9, 4, 2, 4]);
+      cx.lineWidth = 1.0; cx.strokeStyle = 'rgba(140,200,230,.75)';
+      cx.beginPath();
+      cx.moveTo(L - 12, 101); cx.lineTo(L - 12 + (R - L + 24) * k, 101);
+      cx.moveTo(160, T - 12); cx.lineTo(160, T - 12 + (B - T + 24) * k);
+      cx.stroke(); cx.restore();
+    });
+    // ④ 尺寸标注（下边一条 + 两侧延伸线）
+    seg(3, (k) => {
+      cx.lineWidth = 1.0; cx.strokeStyle = '#e8c96a';
+      const y = B + 22;
+      cx.beginPath();
+      cx.moveTo(L, y); cx.lineTo(L + (R - L) * k, y);
+      cx.stroke();
+      // 箭头
+      const arrow = (ax, dir) => {
+        cx.beginPath();
+        cx.moveTo(ax, y); cx.lineTo(ax + dir * 7, y - 3); cx.lineTo(ax + dir * 7, y + 3);
+        cx.closePath(); cx.fillStyle = '#e8c96a'; cx.fill();
+      };
+      arrow(L, 1); arrow(R, -1);
+      // 延伸线
+      cx.beginPath();
+      cx.moveTo(L, B + 3); cx.lineTo(L, y + 5);
+      cx.moveTo(R, B + 3); cx.lineTo(R, y + 5);
+      cx.stroke();
+    });
+    // ⑤ 标注文字
+    seg(4, () => {
+      cx.fillStyle = '#e8c96a'; cx.font = 'bold 11px monospace';
+      cx.textAlign = 'center';
+      cx.fillText('120 ±0.05', 160, B + 36);
+      cx.fillStyle = 'rgba(150,210,235,.85)';
+      cx.fillText('Ø 20 H7', 96, 78);
+      cx.fillText('Ø 20 H7', 224, 78);
+      cx.font = '10px monospace';
+      cx.fillStyle = 'rgba(120,160,185,.8)';
+      cx.fillText('SECTION A-A', 160, 30);
+      cx.textAlign = 'left';
+    });
+    // ⑥ 十字光标（跟着"画到的位置"跑，收尾后停在右下）
+    if (pr < 1) {
+      const cxp = L + (R - L) * ((pr * 6) % 1);
+      const cyp = T + (B - T) * Math.abs(Math.sin(pr * Math.PI * 2));
+      cx.strokeStyle = 'rgba(255,255,255,.55)'; cx.lineWidth = 1;
+      cx.beginPath();
+      cx.moveTo(cxp - 9, cyp); cx.lineTo(cxp + 9, cyp);
+      cx.moveTo(cxp, cyp - 9); cx.lineTo(cxp, cyp + 9);
+      cx.stroke();
+    }
+    cx.shadowBlur = 0;
+    // 底部提示行
+    cx.fillStyle = 'rgba(130,170,195,.65)'; cx.font = '10px monospace';
+    cx.fillText(pr >= 1 ? 'DRAWING COMPLETE' : 'DRAWING... ' + Math.round(pr * 100) + '%', 8, H - 6);
+
+    sc.tex.needsUpdate = true;
+  }
+
+  // 数控切削：从刀尖甩出一小撮，落到工作台就灭
+  function spawnCncSpark(ud) {
+    const s = ud.sparks.find((x) => x.userData.life <= 0);
+    if (!s) return;
+    const tx = ud.table ? ud.table.position.x : 0;
+    const tz = ud.table ? ud.table.position.z : 0.06;
+    s.visible = true;
+    s.position.set(tx + 0.02, 1.055, tz);
+    const a = Math.random() * Math.PI * 2;
+    const sp = 0.20 + Math.random() * 0.62;
+    s.userData.v.set(Math.cos(a) * sp, 0.40 + Math.random() * 0.85, Math.sin(a) * sp);
+    s.userData.life = 0.22 + Math.random() * 0.32;
+    s.scale.setScalar(0.45 + Math.random() * 0.75);
+  }
+
   function renderFrame(t) {
     const dt = Math.min(0.05, lastT ? Math.max(0.001, t - lastT) : 0.016);
     lastT = t;
     // 自动缓慢环绕
-    if (autoSpin && performance.now() - lastInteract > 6000) camTheta += 0.00075;
+    if (autoSpin && performance.now() - lastInteract > 6000 && !focus) camTheta += 0.00075;
+    // 干活自动聚焦：推近 → 停留 → 退回
+    if (focus) updateFocus(t);
 
     const R = camRadius;
     const LT = camTarget || { x: 0, y: 1.6, z: 0 };
@@ -3245,6 +3845,112 @@
       }
     }
 
+    // ---- 示波器：波形扫过 + 电源灯 ----
+    const scg = equipMeshes.scope;
+    if (scg && scg.children[0]) {
+      const ud = scg.children[0].userData;
+      if (ud && ud.screen) {
+        const now = performance.now();
+        const on = anim.scope > now;
+        ud.scrT = (ud.scrT || 0) + dt;
+        if (ud.scrT > 0.055) { ud.scrT = 0; drawOsc(ud, on, now); }
+        if (ud.ledMat) ud.ledMat.emissiveIntensity = on ? 2.6 : 0.85;
+        ud.dbgOn = on ? 1 : 0;
+      }
+    }
+
+    // ---- 数控：主轴自转 + 工作台走位 + 切削火花 + 内腔照明 + 塔灯 ----
+    const cng = equipMeshes.cnc;
+    if (cng && cng.children[0]) {
+      const ud = cng.children[0].userData;
+      if (ud && ud.table && ud.spindle) {
+        const now = performance.now();
+        const on = anim.cnc > now;
+        const p = on ? clamp(1 - (anim.cnc - now) / anim.cncDur, 0, 1) : 0;
+
+        // 主轴：工作时高速转，停机靠惯性停下来
+        const cur = ud.spin || 0;
+        const nv = cur + ((on ? 26 : 0) - cur) * Math.min(1, dt * (on ? 5 : 1.4));
+        ud.spin = nv;
+        if (nv > 0.02) ud.spindle.rotation.y += dt * nv;
+
+        // 工作台：X 往复走位；主轴头沿 Z 小幅步进（真实加工是"走一刀、进一点"）
+        const wx = on ? Math.sin(p * Math.PI * 6) * 0.30 : 0;
+        const wz = on ? Math.cos(p * Math.PI * 4) * 0.11 : 0;
+        ud.table.position.x += (wx - ud.table.position.x) * Math.min(1, dt * 11);
+        ud.table.position.z += ((0.06 + wz) - ud.table.position.z) * Math.min(1, dt * 11);
+        const hz = ud.headZ + (on ? Math.sin(p * Math.PI * 12) * 0.028 : 0);
+        ud.head.position.z += (hz - ud.head.position.z) * Math.min(1, dt * 13);
+
+        // 内腔照明：加工时提亮，停工回落到常亮底值（否则关门后一片黑）
+        if (ud.cavLamp) ud.cavLamp.emissiveIntensity = on ? 2.2 : 0.55;
+        if (ud.cavLight) ud.cavLight.intensity = on ? (8.5 + Math.sin(now * 0.017) * 1.6) : 2.2;
+        if (ud.lampG) ud.lampG.emissiveIntensity = on ? (1.7 + Math.sin(now * 0.011) * 1.1) : 0.22;
+        if (ud.lampY) ud.lampY.emissiveIntensity = on ? 0.30 : 1.5;
+
+        // 面板屏幕
+        ud.scrT = (ud.scrT || 0) + dt;
+        if (ud.scrT > 0.070) { ud.scrT = 0; drawCnc(ud, on, now, p); }
+
+        // 切削火花
+        ud.sparkT = (ud.sparkT || 0) + dt;
+        if (on && ud.sparkT > 0.032) { ud.sparkT = 0; spawnCncSpark(ud); }
+        ud.sparks.forEach((s) => {
+          if (s.userData.life <= 0) return;
+          s.userData.life -= dt;
+          s.userData.v.y -= 8.6 * dt;
+          s.position.addScaledVector(s.userData.v, dt);
+          s.rotation.x += dt * 14; s.rotation.z += dt * 11;
+          if (s.position.y < 0.88) s.userData.life = 0;      // 落到工作台面上就灭
+          if (s.userData.life <= 0) s.visible = false;
+        });
+
+        ud.dbgOn = on ? 1 : 0;
+        ud.dbgP = p;
+        ud.dbgSpin = nv;
+        ud.dbgTableX = ud.table.position.x;
+        ud.dbgSpark = ud.sparks.filter((s) => s.userData.life > 0).length;
+      }
+    }
+
+    // ---- 控制柜：导线一根根接上去，接好后信号灯亮 ----
+    const cab = stations.cab;
+    if (cab && cab.userData && cab.userData.wires) {
+      const ud = cab.userData;
+      const now = performance.now();
+      const on = anim.cab > now;
+      const p = on ? clamp(1 - (anim.cab - now) / anim.cabDur, 0, 1) : 1;
+      const want = on ? Math.floor(p * ud.wires.length + 0.001) : ud.wires.length;
+      for (let i = 0; i < ud.wires.length; i++) {
+        const vis = i < want;
+        if (ud.wires[i].visible !== vis) ud.wires[i].visible = vis;
+      }
+      if (ud.sigMat) {
+        // 干活时绿灯闪，接完常亮；没在干活时暗一点（表示待机）
+        ud.sigMat.emissiveIntensity = on ? (1.2 + Math.sin(now * 0.010) * 0.9) : 0.55;
+      }
+      ud.dbgShown = want;
+      ud.dbgOn = on ? 1 : 0;
+    }
+
+    // ---- 绘图桌：CAD 屏幕按进度一笔笔出图 ----
+    const cad = stations.cad;
+    if (cad && cad.userData && cad.userData.screen) {
+      const ud = cad.userData;
+      const now = performance.now();
+      const on = anim.cad > now;
+      const p = on ? clamp(1 - (anim.cad - now) / anim.cadDur, 0, 1) : 1;
+      ud.cadProg = on ? p : 1;
+      ud.scrT = (ud.scrT || 0) + dt;
+      if ((on && ud.scrT > 0.06) || !ud.cadDrawn) {
+        if (on) ud.scrT = 0;
+        drawCad(ud, now);
+        ud.cadDrawn = true;
+      }
+      ud.dbgProg = ud.cadProg;
+      ud.dbgOn = on ? 1 : 0;
+    }
+
     renderer.setRenderTarget(sceneRT);
     renderer.clear();
     renderer.render(scene, camera);
@@ -3347,6 +4053,7 @@
 
     canvas.addEventListener('pointerdown', (e) => {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      focus = null;                             // 玩家一动手就交出镜头控制权
       pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
       lastInteract = performance.now();
       if (pts.size === 2) {
@@ -3391,6 +4098,7 @@
 
     canvas.addEventListener('wheel', (e) => {
       camRadius = clamp(camRadius + e.deltaY * 0.012, 4, 26);
+      focus = null;                             // 滚轮缩放也视作"我要自己看"，立刻停掉聚焦
       lastInteract = performance.now();
       e.preventDefault();
     }, { passive: false });
@@ -3444,6 +4152,99 @@
     setTimeout(() => el.remove(), 2400);
   }
 
+  /* ============================================================
+     干活自动聚焦
+     木工房机位在 6.7m 外，示波器、数控面板这类东西在全景里只有几十像素，
+     动画做了玩家也看不见。所以每次开工把镜头推到干活的那台设备前，
+     看完自动退回原来的视角；玩家一动鼠标就取消，不抢控制权。
+     a  = 设备本地坐标里"该看哪儿"（工件/屏幕/柜内），d = 推近的距离
+     ============================================================ */
+  const FOCUS_DEF = {
+    lathe:   { a: [0.00, 1.14,  0.10], d: 2.30, up: 0.42 },   // 卡盘与溜板之间
+    drill:   { a: [0.00, 1.02,  0.00], d: 1.75, up: 0.34 },
+    welder:  { a: [-1.55, 0.86, -1.36], d: 1.90, up: 0.50 },  // 焊接小台（电弧落点）
+    printer: { a: [0.00, 0.92,  0.00], d: 1.65, up: 0.36 },
+    scope:   { a: [0.00, 0.86,  0.30], d: 1.45, up: 0.28 },   // 屏幕
+    cnc:     { a: [0.00, 1.12,  1.02], d: 2.55, up: 0.40 },   // 玻璃门内的工作区
+    cab:     { a: [0.00, 1.30,  0.34], d: 2.05, up: 0.30 },   // 柜内导轨
+    cad:     { a: [0.00, 1.10,  0.00], d: 1.75, up: 0.28 }    // 显示器
+  };
+  let focus = null;
+
+  function easeIO(u) {
+    return u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+  }
+
+  // 把"看哪儿"换算成一组相机参数：从设备正面推近，再夹进房间内
+  function focusPreset(id) {
+    const def = FOCUS_DEF[id];
+    const holder = (id === 'cab' || id === 'cad') ? stations[id] : equipMeshes[id];
+    if (!def || !holder) return null;
+    holder.updateMatrixWorld(true);
+    const v = new T.Vector3(def.a[0], def.a[1], def.a[2]);
+    holder.localToWorld(v);                        // 设备都带 rotation.y，必须换算到世界坐标
+
+    const ry = holder.rotation.y || 0;
+    const fx = Math.sin(ry), fz = Math.cos(ry);    // 设备正面朝向（模型局部 +z）
+    const cl = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+    const cx = cl(v.x + fx * def.d, -3.55, 3.55);  // 夹进墙内，否则镜头会穿墙看到背面
+    const cy = cl(v.y + def.up, 0.90, 2.60);
+    const cz = cl(v.z + fz * def.d, -4.30, 3.30);
+
+    const dx = cx - v.x, dy = cy - v.y, dz = cz - v.z;
+    const r = Math.hypot(dx, dy, dz);
+    return {
+      theta: Math.atan2(dx, dz),
+      phi: Math.acos(Math.min(1, Math.max(-1, dy / r))),
+      r,
+      t: { x: v.x, y: v.y, z: v.z }
+    };
+  }
+
+  function startFocus(id, ms) {
+    const to = focusPreset(id);
+    if (!to) return;
+    const now = performance.now();
+    // 已经在聚焦时又一次开工：留着最开始的视角当"回程终点"，别把中间帧当原位
+    const from = focus ? focus.from : {
+      theta: camTheta, phi: camPhi, r: camRadius,
+      t: camTarget ? { x: camTarget.x, y: camTarget.y, z: camTarget.z } : { x: 0, y: 1.6, z: 0 }
+    };
+    focus = {
+      id,
+      from, to,
+      nullT: !camTarget && !focus,     // 原本就在自动环绕（camTarget 为空）时，回程后要清回去
+      t0: now, flyIn: 850, flyBack: 900,
+      hold: Math.max(2000, (ms || 2000) + 250)
+    };
+  }
+
+  function updateFocus(now) {
+    const f = focus;
+    const el = now - f.t0;
+    let a, b, u;
+    if (el < f.flyIn) { a = f.from; b = f.to; u = easeIO(el / f.flyIn); }
+    else if (el < f.flyIn + f.hold) { a = f.to; b = f.to; u = 1; }
+    else if (el < f.flyIn + f.hold + f.flyBack) {
+      a = f.to; b = f.from; u = easeIO((el - f.flyIn - f.hold) / f.flyBack);
+    } else {                                       // 收尾：精确回到原位
+      camTheta = f.from.theta; camPhi = f.from.phi; camRadius = f.from.r;
+      camTarget = f.nullT ? null : { x: f.from.t.x, y: f.from.t.y, z: f.from.t.z };
+      focus = null;
+      return;
+    }
+    let dth = b.theta - a.theta;                   // 走最短弧，别绕一整圈
+    while (dth > Math.PI) dth -= Math.PI * 2;
+    while (dth < -Math.PI) dth += Math.PI * 2;
+    camTheta = a.theta + dth * u;
+    camPhi = a.phi + (b.phi - a.phi) * u;
+    camRadius = a.r + (b.r - a.r) * u;
+    if (!camTarget) camTarget = { x: 0, y: 1.6, z: 0 };
+    camTarget.x = a.t.x + (b.t.x - a.t.x) * u;
+    camTarget.y = a.t.y + (b.t.y - a.t.y) * u;
+    camTarget.z = a.t.z + (b.t.z - a.t.z) * u;
+  }
+
   // 让某台设备"动起来"（已实现：台钻、车床、焊机；数控照这个模式扩）
   function animEquip(id, ms) {
     if (!state || !state.equip[id] || !equipMeshes[id]) return false;
@@ -3457,7 +4258,38 @@
       anim.weldDur = d; anim.weld = performance.now() + d;
       if (SFX.weld) SFX.weld(d);
     }
+    else if (id === 'scope') {
+      anim.scopeDur = ms || 1600;
+    }
+    else if (id === 'cnc') {
+      // 数控一刀要走好一会儿：太短的动画看不出"在加工"，只是闪了一下
+      const d = Math.max(2800, (ms || 2000) * 1.8);
+      anim.cncDur = d; anim.cnc = performance.now() + d;
+      if (SFX.cnc) SFX.cnc(d);
+    }
     lastInteract = performance.now();
+    // 镜头推过去：否则在默认 6.7m 机位下，这些设备的动作只是几十个像素
+    const holdMs = id === 'welder' ? anim.weldDur : (id === 'cnc' ? anim.cncDur : (ms || 1600));
+    startFocus(id, holdMs);
+    return true;
+  }
+
+  // 非设备类工位（控制柜配线 / CAD 出图）：接到对应性质的活才点亮
+  function animStation(id, ms) {
+    const s = stations[id];
+    if (!s) return false;
+    const now = performance.now();
+    const d = Math.max(2600, ms || 2200);
+    if (id === 'cab') {
+      // 每次开工都把线"退回去重接"—— 否则只有第一次看得到逐根配线的过程
+      if (s.userData.wires) s.userData.wires.forEach((w) => { w.visible = false; });
+      anim.cabDur = d; anim.cab = now + d;
+    } else if (id === 'cad') {
+      s.userData.cadProg = 0; s.userData.cadDrawn = false;
+      anim.cadDur = d; anim.cad = now + d;
+    }
+    lastInteract = now;
+    startFocus(id, d);
     return true;
   }
 
@@ -3612,6 +4444,9 @@
     log('干了一格「' + o.name + '」，还差 ' + left + ' 格。');
     // 用到的机器直接在 3D 车间里开机（一台活可能同时要用车床和台钻）
     animEquipList(o.equip, 1500);
+    // 按订单性质点亮对应工位：电工活 → 控制柜配线；设计活 → CAD 出图
+    if (o.req && o.req.elec) animStation('cab', 3200);
+    if (o.req && o.req.design) animStation('cad', 3800);
     advanceTime();
     if (o.done >= o.steps) toast('「' + o.name + '」可以交了', 'good');
   }
@@ -4294,6 +5129,74 @@
       }
     }
     // #dev7run：焊机常开 + 固定机位，把电弧亮度/焊枪摆幅写进 title 供无头脚本验证
+    // #dev8：四件新动画（示波器 / 数控 / 控制柜配线 / CAD 出图）一次性开机
+    //   #dev8          玩家默认全景（看后墙的控制柜与绘图桌）
+    //   #dev8home      玩家默认全景（显式写法）
+    //   #dev8cnc / #dev8scope / #dev8cab / #dev8cad  单品特写（直接用自动聚焦的机位，
+    //                  这样截图验证的就是玩家干活时真正会看到的画面）
+    if (H.indexOf('#dev8') === 0) {
+      startGame(1, true);
+      state.cash = 200000;
+      EQUIP_DEF.forEach((e) => (state.equip[e.id] = true));
+      SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
+      syncEquipMeshes(); renderAll();
+      autoSpin = false;
+      camTheta = CAM_WOOD.theta; camPhi = CAM_WOOD.phi; camRadius = CAM_WOOD.r;
+      camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
+      const solo = ['cnc', 'scope', 'cab', 'cad'].filter((k) => H.indexOf('#dev8' + k) === 0)[0];
+      if (solo) {
+        const p = focusPreset(solo);
+        if (p) { camTheta = p.theta; camPhi = p.phi; camRadius = p.r; camTarget = p.t; }
+      }
+      // 数控/示波器长时间开机；控制柜与 CAD 用短周期循环，才能看到"逐根接上 / 一笔笔画"
+      // 起手就把进度停在半途（约 56% / 45%），这样无头截图不必等到动画跑完，
+      // 既省掉几十次软件渲染的时间，也让"接了一半、画了一半"这种中间态能被拍到
+      const kick = () => {
+        const n = performance.now();
+        anim.scope = n + 600000; anim.scopeDur = 600000;
+        anim.cnc = n + 600000; anim.cncDur = 600000;
+        if (anim.cab <= n) { anim.cabDur = 1600; anim.cab = n + 700; }
+        if (anim.cad <= n) { anim.cadDur = 2000; anim.cad = n + 1100; }
+        if (stations.cab && anim.cab > n && (anim.cab - n) > anim.cabDur - 40) {
+          stations.cab.userData.wires.forEach((w) => { w.visible = false; });
+        }
+        if (stations.cad && anim.cad > n && (anim.cad - n) > anim.cadDur - 40) {
+          stations.cad.userData.cadProg = 0; stations.cad.userData.cadDrawn = false;
+        }
+      };
+      kick();
+      let n8 = 0;
+      let cabMin = 99, cabMax = -1, cadMin = 9, cadMax = -1;
+      setInterval(() => {
+        // 无头环境下每次 renderFrame（含 SSAO/Bloom 全链）要 1~3 秒，
+        // 跑 90 帧会直接把 spawnSync 的 180 秒预算烧完 —— 22 帧足够截图和取数
+        if (n8++ > 22) return;
+        kick();
+        renderFrame(performance.now());
+        const cb = stations.cab && stations.cab.userData;
+        if (cb && cb.dbgShown !== undefined) {
+          cabMin = Math.min(cabMin, cb.dbgShown); cabMax = Math.max(cabMax, cb.dbgShown);
+        }
+        const cd = stations.cad && stations.cad.userData;
+        if (cd && cd.dbgProg !== undefined) {
+          cadMin = Math.min(cadMin, cd.dbgProg); cadMax = Math.max(cadMax, cd.dbgProg);
+        }
+      }, 24);
+      setInterval(() => {
+        const sg = equipMeshes.scope && equipMeshes.scope.children[0];
+        const udS = sg && sg.userData;
+        const cg = equipMeshes.cnc && equipMeshes.cnc.children[0];
+        const udC = cg && cg.userData;
+        const cb = stations.cab && stations.cab.userData;
+        const cd = stations.cad && stations.cad.userData;
+        document.title = 'DEV8' +
+          ' | scope=' + (udS ? udS.dbgOn : 'X') +
+          ' | cnc=' + (udC ? udC.dbgOn + ',spin' + (udC.dbgSpin || 0).toFixed(1) +
+            ',tx' + (udC.dbgTableX || 0).toFixed(3) + ',spark' + (udC.dbgSpark || 0) : 'X') +
+          ' | cab=' + (cb ? cb.dbgShown + '(' + cabMin + '~' + cabMax + ')' : 'X') +
+          ' | cad=' + (cd ? (cd.dbgProg || 0).toFixed(2) + '(' + cadMin.toFixed(2) + '~' + cadMax.toFixed(2) + ')' : 'X');
+      }, 250);
+    }
     if (H.indexOf('#dev7') === 0) {
       startGame(1, true);
       state.cash = 200000;
