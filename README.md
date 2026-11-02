@@ -2,12 +2,15 @@
 
 > 一间属于自己的 3D 木工房。接单、练手艺、攒设备、做作品——从一台旧车床开始，把它做成能接活的工作室。
 
-**▶ 在线试玩**：<https://my-workshop-3d.app.workbuddy.host/?sharecode=VUO4RSJKCV>
-**▶ GitHub Pages**：<https://kittyldj.github.io/workshop-game/>
-**🧩 形态**：单个 HTML 文件，双击即玩，无需安装、无需联网、无需后端
-**🛠 技术**：Three.js r160 + 自写后期管线（SSAO / Bloom / ACES / 分离色调）
-**📜 许可**：[AGPL-3.0](LICENSE) — 商业使用需单独授权，见 [COMMERCIAL.md](COMMERCIAL.md)
-**✉️ 合作**：见下方「合作洽谈」
+- **▶ 立即试玩**（国内直连，推荐）：<https://my-workshop-3d.app.workbuddy.host/?sharecode=VUO4RSJKCV>
+- **▶ 备用入口**（GitHub Pages，海外推荐）：<https://kittyldj.github.io/workshop-game/>
+- **▶ 源码 / 许可 / 合作**：就是本仓库
+- **🧩 形态**：单个 HTML 文件，双击即玩，无需安装、无需联网、无需后端
+- **🛠 技术**：Three.js r160 + 自写后期管线（SSAO / Bloom / ACES / 分离色调）
+- **📜 许可**：[AGPL-3.0](LICENSE) — 商业使用需单独授权，见 [COMMERCIAL.md](COMMERCIAL.md)
+- **✉️ 合作**：见下方「合作洽谈」
+
+> **该点哪一条？** 国内访问用第一条，秒开；海外或用 GitHub 账号登录走第二条。想看代码、许可证或谈合作，留在本仓库就好。
 
 ![预览](docs/preview.png)
 
@@ -55,7 +58,14 @@
 ## 快速开始
 
 ### 直接玩
-打开 <https://my-workshop-3d.app.workbuddy.host/?sharecode=VUO4RSJKCV> 就能玩（无需安装）。
+
+**在线**（无需安装，打开就能玩）
+
+- 国内直连：<https://my-workshop-3d.app.workbuddy.host/?sharecode=VUO4RSJKCV>
+- GitHub Pages：<https://kittyldj.github.io/workshop-game/>
+
+**离线**（下载本仓库后）
+
 ```bash
 # 双击 index.html 即可（file:// 就能跑）
 ```
