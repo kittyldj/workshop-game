@@ -1,0 +1,15 @@
+{
+  "name": "workshop-game",
+  "version": "0.2.0",
+  "description": "我的工作室 · WORKSHOP — 单文件 3D 木工房经营游戏 (Three.js)",
+  "private": true,
+  "scripts": {
+    "build": "node build.js"
+  },
+  "license": "AGPL-3.0-or-later",
+  "author": "TODO: 你的署名",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TODO/workshop-game"
+  }
+}

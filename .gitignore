@@ -1,0 +1,16 @@
+# 依赖与构建残留
+node_modules/
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地调试产物（截图、会话文件等）
+*.tmp
+.edgeprof*/
+cap.txt
+.capdom.txt
