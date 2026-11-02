@@ -3,7 +3,7 @@
 > 一间属于自己的 3D 木工房。接单、练手艺、攒设备、做作品——从一台旧车床开始，把它做成能接活的工作室。
 
 **▶ 在线试玩**：<https://my-workshop-3d.app.workbuddy.host/?sharecode=VUO4RSJKCV>
-**▶ 镜像**：<https://kittyldj.github.io/workshop-game/>（GitHub Pages，待开启）
+**▶ GitHub Pages**：<https://kittyldj.github.io/workshop-game/>
 **🧩 形态**：单个 HTML 文件，双击即玩，无需安装、无需联网、无需后端
 **🛠 技术**：Three.js r160 + 自写后期管线（SSAO / Bloom / ACES / 分离色调）
 **📜 许可**：[AGPL-3.0](LICENSE) — 商业使用需单独授权，见 [COMMERCIAL.md](COMMERCIAL.md)
