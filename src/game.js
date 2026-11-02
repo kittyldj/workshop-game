@@ -3699,13 +3699,37 @@
     // 干活自动聚焦：推近 → 停留 → 退回
     if (focus) updateFocus(t);
 
-    const R = camRadius;
+    // 聚焦被玩家打断后的回家过渡：靶点搬回房间中心、半径拉回全景
+    if (camHome) {
+      const u = clamp((t - camHome.t0) / 520, 0, 1), e = easeIO(u);
+      camTarget = {
+        x: camHome.t.x + (camHome.home.x - camHome.t.x) * e,
+        y: camHome.t.y + (camHome.home.y - camHome.t.y) * e,
+        z: camHome.t.z + (camHome.home.z - camHome.t.z) * e
+      };
+      const R1 = Math.max(CAM_HOME_R, camHome.r);
+      camRadius = camHome.r + (R1 - camHome.r) * e;
+      if (u >= 1) { camHome = null; camTarget = null; }   // 交回自动环绕
+    }
+
     const LT = camTarget || { x: 0, y: 1.6, z: 0 };
-    camera.position.set(
-      LT.x + R * Math.sin(camPhi) * Math.sin(camTheta),
-      LT.y + R * Math.cos(camPhi),
-      LT.z + R * Math.sin(camPhi) * Math.cos(camTheta)
+    const place = () => camera.position.set(
+      LT.x + camRadius * Math.sin(camPhi) * Math.sin(camTheta),
+      LT.y + camRadius * Math.cos(camPhi),
+      LT.z + camRadius * Math.sin(camPhi) * Math.cos(camTheta)
     );
+    place();
+    /* 屋外兜底：非聚焦时相机绝不允许落进屋壳内。
+       滚轮/捏合缩放把它缩进屋、或者靶点偏离中心时，都会让相机贴到墙背面，
+       整屏被糊住。这里沿"靶点→相机"的方向把半径推到墙外 0.55m。 */
+    if (!focus && !camNoGuard && insideRoom(camera.position)) {
+      const dx = camera.position.x - LT.x;
+      const dy = camera.position.y - LT.y;
+      const dz = camera.position.z - LT.z;
+      const L = Math.hypot(dx, dy, dz) || 1;
+      camRadius = exitDist(LT, dx / L, dy / L, dz / L) + 0.55;
+      place();
+    }
     camera.lookAt(LT.x, LT.y, LT.z);
 
     // 聚焦补光：淡入淡出，位置贴在相机略上方（像操作者身上的头灯）
@@ -4104,11 +4128,14 @@
       if (pts.size >= 2) {
         const v = Array.from(pts.values());
         const d = dist2(v[0], v[1]);
-        if (pinchPrev > 6 && d > 6) camRadius = clamp(camRadius * (pinchPrev / d), 3.4, 26);
+        if (pinchPrev > 6 && d > 6) camRadius = clamp(camRadius * (pinchPrev / d), 6.2, 26);
         pinchPrev = d;
         return;
       }
       if (!dragging) return;
+      // 拖动也视作"我要自己看"：不取消的话，updateFocus 每帧都会把
+      // camTheta/camPhi 覆盖回去，玩家会觉得"鼠标怎么拖都不动"（踩过）
+      cancelFocus();
       camTheta -= (e.clientX - px) * 0.006;
       camPhi = clamp(camPhi - (e.clientY - py) * 0.004, 0.40, 1.55);
       px = e.clientX; py = e.clientY;
@@ -4128,7 +4155,8 @@
     canvas.addEventListener('pointercancel', endPointer);
 
     canvas.addEventListener('wheel', (e) => {
-      camRadius = clamp(camRadius + e.deltaY * 0.012, 4, 26);
+      // 下限 6.2：再近相机就落进屋壳内，会被墙的背面糊住（下限 4 时实测会黑）
+      camRadius = clamp(camRadius + e.deltaY * 0.012, 6.2, 26);
       cancelFocus();                            // 滚轮缩放也视作"我要自己看"，立刻停掉聚焦
       lastInteract = performance.now();
       e.preventDefault();
@@ -4201,6 +4229,34 @@
     cad:     { a: [0.00, 1.10,  0.00], d: 1.75, up: 0.28 }    // 显示器
   };
   let focus = null;
+  let camHome = null;   // 聚焦被玩家打断后的"回家"过渡：target → 房间中心、半径 → 全景
+  let camNoGuard = false;  // 调试机位专用：关掉"相机不出屋"兜底（#dev6 之类刻意贴脸的机位）
+
+  /* 房间外壳（比墙体略内缩）。
+     默认机位在屋外，靠背面剔除看进屋 —— 这是刻意的构图方式；
+     一旦相机落进屋壳内，看到的就是墙的背面，画面糊成一块黑，
+     而且旋转只是沿墙面扫过，玩家会觉得"怎么转都恢复不了"。
+     所以非聚焦时相机必须待在屋外，这条在每帧兜底。 */
+  const ROOM_BOX = { x0: -3.85, x1: 3.85, y0: 0.05, y1: 3.45, z0: -4.55, z1: 3.55 };
+  const CAM_HOME_R = 6.68;      // 全景半径（与 CAM_WOOD.r 一致）
+
+  function insideRoom(p) {
+    return p.x > ROOM_BOX.x0 && p.x < ROOM_BOX.x1 &&
+           p.y > ROOM_BOX.y0 && p.y < ROOM_BOX.y1 &&
+           p.z > ROOM_BOX.z0 && p.z < ROOM_BOX.z1;
+  }
+
+  // 从盒内的点 o 沿单位方向 (dx,dy,dz) 射出，返回到盒壁的距离
+  function exitDist(o, dx, dy, dz) {
+    let t = Infinity;
+    if (dx > 1e-6) t = Math.min(t, (ROOM_BOX.x1 - o.x) / dx);
+    else if (dx < -1e-6) t = Math.min(t, (ROOM_BOX.x0 - o.x) / dx);
+    if (dy > 1e-6) t = Math.min(t, (ROOM_BOX.y1 - o.y) / dy);
+    else if (dy < -1e-6) t = Math.min(t, (ROOM_BOX.y0 - o.y) / dy);
+    if (dz > 1e-6) t = Math.min(t, (ROOM_BOX.z1 - o.z) / dz);
+    else if (dz < -1e-6) t = Math.min(t, (ROOM_BOX.z0 - o.z) / dz);
+    return t === Infinity ? 0 : t;
+  }
 
   function easeIO(u) {
     return u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
@@ -4301,13 +4357,19 @@
   }
 
   /* 玩家一动手就交出镜头控制权。
-     额外做一件事：聚焦时 camRadius 可能被推到 1.9m 上下，如果就这么交回去，
-     玩家拖拽只是在原地打转、看不到变化，会以为"卡死了"。所以太近就弹回一个
-     能看全局的距离。 */
+     这里的关键不是"把半径弹大一点"，而是**把靶点从设备搬回房间中心**：
+     靶点留在设备上时，玩家一转视角，相机就绕着这台（多半贴墙的）设备画圆，
+     圆有一半落在墙里或机箱里 —— 看到的是一整块黑，而且越转越出不来。
+     所以取消聚焦时启动一段 520ms 的"回家"过渡，靶点回中心、半径回全景。 */
   function cancelFocus() {
     if (!focus) return;
+    camHome = {
+      t0: performance.now(),
+      t: camTarget ? { x: camTarget.x, y: camTarget.y, z: camTarget.z } : { x: 0, y: 1.6, z: 0 },
+      r: camRadius,
+      home: { x: 0, y: 1.6, z: 0 }
+    };
     focus = null;
-    if (camRadius < 2.6) camRadius = 4.6;
   }
 
   // 让某台设备"动起来"（已实现：台钻、车床、焊机；数控照这个模式扩）
@@ -5196,6 +5258,50 @@
     }
     // #god：等同于连按三次 A 的后门，供无头脚本验证（玩家用键盘 A A A）
     if (H.indexOf('#god') >= 0) godMode();
+    /* #devcamlow：把半径压到 4（比缩放下限还小），验证"相机不出屋"兜底
+       会不会把镜头推回全景。修复前这里就是一片黑。
+       #devcamlowclean：同上但隐藏 UI，方便截图比对。 */
+    if (H.indexOf('#devcamlow') >= 0) {
+      startGame(1, true);
+      autoSpin = false;
+      camTheta = CAM_WOOD.theta; camPhi = CAM_WOOD.phi;
+      camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
+      camRadius = 4;
+    }
+    /* #camaudit：不看图，直接算。枚举玩家可能到达的 (theta, phi, 半径) 组合，
+       每个都走一遍"屋外兜底"，统计修正后仍落在屋壳内的个数。0 才算通过。
+       结果写进 <title>，供无头 --dump-dom 读取。 */
+    if (H.indexOf('#camaudit') >= 0) {
+      const targets = [
+        { x: 0, y: 1.6, z: 0 },        // 自动环绕
+        { x: -1.36, y: 1.07, z: -1.72 },// 默认构图靶点
+        { x: -2.52, y: 1.12, z: 1.90 }  // 贴左墙的数控（聚焦后最容易出事）
+      ];
+      let tot = 0, bad = 0;
+      targets.forEach((tg) => {
+        for (let th = 0; th < 6.28; th += 0.26) {
+          for (let ph = 0.40; ph <= 1.5501; ph += 0.19) {
+            [4, 5, 6.2, 9, 17.5, 26].forEach((r0) => {
+              const sp = Math.sin(ph), cp = Math.cos(ph);
+              let p = { x: tg.x + r0 * sp * Math.sin(th), y: tg.y + r0 * cp, z: tg.z + r0 * sp * Math.cos(th) };
+              if (insideRoom(p)) {
+                const dx = p.x - tg.x, dy = p.y - tg.y, dz = p.z - tg.z;
+                const L = Math.hypot(dx, dy, dz) || 1;
+                const rr = exitDist(tg, dx / L, dy / L, dz / L) + 0.55;
+                p = { x: tg.x + rr * sp * Math.sin(th), y: tg.y + rr * cp, z: tg.z + rr * sp * Math.cos(th) };
+              }
+              tot++;
+              if (insideRoom(p)) bad++;
+            });
+          }
+        }
+      });
+      const out = document.createElement('div');
+      out.id = 'camaudit-out';
+      out.style.display = 'none';
+      out.textContent = 'CAMAUDIT-RESULT tot=' + tot + ' bad=' + bad;
+      document.body.appendChild(out);
+    }
     // #dev6：车床特写，用于逐件打磨（不影响玩家）
     // #dev6run：车床常开 + 全景机位，并把运动量写进 title，供无头脚本验证动画在跑
     if (H.indexOf('#dev6') === 0) {
@@ -5229,6 +5335,7 @@
         }, 250);
       } else {
         camTheta = 1.88; camPhi = 1.20; camRadius = 2.3;
+        camNoGuard = true;                       // 刻意贴脸的特写，别被"不出屋"兜底拉走
         camTarget = { x: -3.75, y: 1.02, z: 3.35 };
       }
     }
