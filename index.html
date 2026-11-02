@@ -1499,20 +1499,36 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const IRON = MAT.iron, IROND = MAT.ironD, MACH = MAT.mach, PAINT = MAT.paint;
     const RZ = (m) => rot(m, 'x', Math.PI / 2);   // 轴向沿 Z 的圆柱
 
+    /* 老车床的"三层材质对比"：刷漆铸铁 / 研磨导轨 / 黑胶木手柄。
+       三者反光完全不同，这是它从"灰色塑料模型"变成"一台机器"的最大来源。
+       clone 是为了继承 MAT.iron 已挂好的铸铁麻面法线贴图与粗糙度扰动。 */
+    const PBody = MAT.iron.clone();          // 漆身：老机床灰绿，哑光
+    PBody.color.setHex(0x7d8072); PBody.metalness = 0.04; PBody.roughness = 0.54;
+    const PDark = MAT.ironD.clone();         // 漆身暗部：底面、凹槽
+    PDark.color.setHex(0x5c5f53); PDark.metalness = 0.05; PDark.roughness = 0.62;
+    const WAY = MAT.mach.clone();            // 裸露研磨导轨：亮钢，强反光
+    WAY.color.setHex(0xb9b6a7); WAY.metalness = 0.86; WAY.roughness = 0.20;
+    const BAK = MAT.black.clone();           // 黑胶木手柄
+    BAK.color.setHex(0x14140f); BAK.roughness = 0.50;
+
     /* ---------- 铸铁立柱底座（两台）---------- */
     function pedestal(z) {
       const p = new T.Group();
-      p.add(box(0.56, 0.05, 0.50, IROND, 0, 0.025, 0));          // 地脚板
-      p.add(box(0.46, 0.60, 0.36, IRON, 0, 0.35, 0));            // 立柱体
-      p.add(box(0.52, 0.07, 0.40, IROND, 0, 0.685, 0));          // 顶板
-      p.add(box(0.50, 0.05, 0.38, IRON, 0, 0.09, 0));            // 下沿加厚
-      // 侧面减重凹槽（铸造感）
-      [0.235, -0.235].forEach((x) => p.add(box(0.015, 0.30, 0.22, IROND, x, 0.36, 0)));
-      // 前后腹板
-      [0.185, -0.185].forEach((z2) => p.add(box(0.34, 0.26, 0.015, IROND, 0, 0.30, z2)));
-      // 地脚螺栓
-      [[-0.19, -0.17], [0.19, -0.17], [-0.19, 0.17], [0.19, 0.17]].forEach(([a, b]) => {
-        p.add(cyl(0.015, 0.015, 0.028, MACH, a, 0.062, b, 8));
+      p.add(box(0.62, 0.055, 0.56, PDark, 0, 0.028, 0));         // 地脚板（外扩一圈）
+      p.add(box(0.54, 0.045, 0.48, PBody, 0, 0.078, 0));         // 地脚台阶
+      p.add(box(0.48, 0.30, 0.40, PBody, 0, 0.25, 0));           // 立柱下段
+      p.add(box(0.42, 0.30, 0.34, PBody, 0, 0.55, 0));           // 立柱上段（收窄 → 锥形）
+      p.add(box(0.50, 0.06, 0.42, PDark, 0, 0.69, 0));           // 顶托板（顶面 0.72 承床身）
+      // 四角铸造凸棱 —— 立柱不再是一整块方块
+      [[0.238, 0.198], [-0.238, 0.198], [0.238, -0.198], [-0.238, -0.198]].forEach(([a, b]) => {
+        p.add(box(0.030, 0.58, 0.030, PBody, a, 0.40, b));
+      });
+      // 前后腹板凹槽（铸造减重）
+      [0.208, -0.208].forEach((z2) => p.add(box(0.30, 0.26, 0.012, PDark, 0, 0.32, z2)));
+      // 地脚螺栓 + 垫片
+      [[-0.21, -0.19], [0.21, -0.19], [-0.21, 0.19], [0.21, 0.19]].forEach(([a, b]) => {
+        p.add(cyl(0.024, 0.024, 0.010, PDark, a, 0.060, b, 10));
+        p.add(cyl(0.015, 0.015, 0.028, MACH, a, 0.078, b, 8));
       });
       p.position.z = z;
       return p;
@@ -1520,60 +1536,82 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     g.add(pedestal(-0.80));
     g.add(pedestal(0.90));
 
-    /* ---------- 床身 ---------- */
+    /* ---------- 床身（厚重铸铁箱体，不是架起来的薄板）---------- */
     const BEDY = 0.79;
-    g.add(box(0.42, 0.14, 2.38, IRON, 0, BEDY, 0.05));           // 床身箱体
-    g.add(box(0.44, 0.035, 2.40, IROND, 0, BEDY - 0.085, 0.05)); // 下沿
-    // 两条研磨导轨
+    g.add(box(0.46, 0.130, 2.38, PBody, 0, 0.785, 0.05));        // 床身箱体（底面 0.72）
+    g.add(box(0.48, 0.020, 2.40, PDark, 0, 0.860, 0.05));        // 导轨台面
+    g.add(box(0.48, 0.026, 2.40, PDark, 0, 0.733, 0.05));        // 下沿
+    // 侧面横向加强肋：铸铁箱体的标志，去掉"一片铁板"的观感
+    for (let i = 0; i < 6; i++) {
+      const zz = -1.12 + i * 0.45;
+      [0.234, -0.234].forEach((x) => g.add(box(0.014, 0.095, 0.048, PBody, x, 0.79, zz)));
+    }
+    // 两条研磨导轨（亮钢，与哑光漆身形成强对比）
     [-0.115, 0.115].forEach((x) => {
-      g.add(box(0.088, 0.042, 2.34, MACH, x, BEDY + 0.088, 0.05));
+      g.add(box(0.092, 0.030, 2.34, WAY, x, 0.884, 0.05));
     });
     // 中间让刀槽
-    g.add(box(0.10, 0.02, 2.30, IROND, 0, BEDY + 0.075, 0.05));
+    g.add(box(0.10, 0.016, 2.30, PDark, 0, 0.862, 0.05));
     // 齿条护板
-    g.add(box(0.03, 0.07, 2.26, IROND, 0.215, BEDY - 0.03, 0.05));
+    g.add(box(0.03, 0.07, 2.26, PDark, 0.225, BEDY - 0.02, 0.05));
     // 床身端面法兰
-    [-1.15, 1.20].forEach((z) => g.add(box(0.40, 0.16, 0.03, IROND, 0, BEDY, z)));
+    [-1.15, 1.20].forEach((z) => g.add(box(0.44, 0.15, 0.03, PDark, 0, BEDY, z)));
 
-    /* ---------- 接屑盘 ---------- */
-    g.add(box(0.74, 0.025, 2.10, IROND, 0, 0.655, 0.05));
-    g.add(box(0.74, 0.10, 0.02, IROND, 0, 0.705, 1.09));
-    g.add(box(0.74, 0.10, 0.02, IROND, 0, 0.705, -0.99));
-    [0.37, -0.37].forEach((x) => g.add(box(0.02, 0.10, 2.10, IROND, x, 0.705, 0.05)));
+    /* ---------- 接屑盘（带卷边）---------- */
+    g.add(box(0.74, 0.025, 2.10, PDark, 0, 0.655, 0.05));
+    g.add(box(0.74, 0.10, 0.02, PDark, 0, 0.705, 1.09));
+    g.add(box(0.74, 0.10, 0.02, PDark, 0, 0.705, -0.99));
+    [0.37, -0.37].forEach((x) => g.add(box(0.02, 0.10, 2.10, PDark, x, 0.705, 0.05)));
+    // 卷边：钣金边圆角，去掉"四张纸片围一圈"的感觉
+    [0.37, -0.37].forEach((x) => g.add(RZ(cyl(0.012, 0.012, 2.10, PDark, x, 0.755, 0.05, 8))));
+    [1.09, -0.99].forEach((z) => g.add(rot(cyl(0.012, 0.012, 0.74, PDark, 0, 0.755, z, 8), 'z', Math.PI / 2)));
 
     /* ---------- 主轴箱 ---------- */
     const HY = 1.15;
-    g.add(box(0.44, 0.62, 0.56, IRON, 0, HY + 0.02, -0.83));      // 箱体
-    g.add(box(0.46, 0.10, 0.58, IROND, 0, HY + 0.35, -0.83));     // 箱顶
-    g.add(box(0.30, 0.06, 0.30, IROND, 0, HY + 0.42, -0.83));     // 顶盖凸台
+    g.add(box(0.46, 0.58, 0.56, PBody, 0, 1.19, -0.83));          // 箱体（底面 0.90 坐在床身上）
+    g.add(box(0.48, 0.08, 0.58, PDark, 0, 1.52, -0.83));          // 箱顶
+    g.add(box(0.32, 0.06, 0.32, PBody, 0, 1.58, -0.83));          // 顶盖凸台
+    g.add(box(0.34, 0.34, 0.03, PDark, 0, 1.19, -0.565));         // 前脸凸台（做出层次）
+    // 顶部变速拨杆
+    g.add(cyl(0.012, 0.012, 0.17, MACH, 0.11, 1.67, -0.74, 8));
+    g.add(cyl(0.026, 0.026, 0.034, BAK, 0.11, 1.77, -0.74, 12));
 
     // 主轴头 + 法兰 + 三爪卡盘
-    g.add(RZ(cyl(0.105, 0.115, 0.10, MACH, 0, HY, -0.52, 24)));   // 主轴法兰
+    g.add(RZ(cyl(0.105, 0.115, 0.10, WAY, 0, HY, -0.52, 24)));    // 主轴法兰（研磨亮面）
     const chuck = new T.Group();
     chuck.position.set(0, HY, -0.44);
-    chuck.add(RZ(cyl(0.150, 0.155, 0.115, MACH, 0, 0, 0, 28)));   // 卡盘体
-    chuck.add(RZ(cyl(0.142, 0.142, 0.012, IROND, 0, 0, 0.062, 28))); // 端面台阶
-    for (let i = 0; i < 3; i++) {                                  // 三爪
+    chuck.add(RZ(cyl(0.150, 0.155, 0.115, WAY, 0, 0, 0, 28)));    // 卡盘体
+    chuck.add(RZ(cyl(0.142, 0.142, 0.012, PDark, 0, 0, 0.062, 28))); // 端面台阶
+    for (let i = 0; i < 3; i++) {                                  // 三爪：做阶梯牙，不再是三块平砖
       const a = (i / 3) * Math.PI * 2 + 0.4;
-      const jaw = box(0.045, 0.052, 0.10, MACH, Math.cos(a) * 0.072, Math.sin(a) * 0.072, 0.075);
+      const jaw = box(0.048, 0.056, 0.058, MACH, Math.cos(a) * 0.072, Math.sin(a) * 0.072, 0.048);
       jaw.rotation.z = a;
       chuck.add(jaw);
-      // 夹爪调节孔
-      chuck.add(RZ(cyl(0.014, 0.014, 0.02, IROND, Math.cos(a + 0.5) * 0.112, Math.sin(a + 0.5) * 0.112, 0.055, 10)));
+      const jaw2 = box(0.034, 0.040, 0.042, MACH, Math.cos(a) * 0.064, Math.sin(a) * 0.064, 0.098);
+      jaw2.rotation.z = a;
+      chuck.add(jaw2);
+      // 夹爪调节孔 + 卡盘扳手方孔
+      chuck.add(RZ(cyl(0.013, 0.013, 0.02, PDark, Math.cos(a + 0.5) * 0.112, Math.sin(a + 0.5) * 0.112, 0.055, 10)));
+      chuck.add(box(0.019, 0.019, 0.008, MAT.black, Math.cos(a + 1.05) * 0.118, Math.sin(a + 1.05) * 0.118, 0.066));
     }
     // 工件（车到一半的轴）
     chuck.add(RZ(cyl(0.036, 0.036, 0.40, MACH, 0, 0, 0.32, 18)));
     chuck.add(RZ(cyl(0.030, 0.030, 0.10, MAT.brass, 0, 0, 0.52, 14)));  // 铜环
     g.add(chuck);
 
-    // 主轴箱正面的变速手柄 / 铭牌 / 油标
+    // 主轴箱侧面的变速手柄（朝外伸出）+ 铭牌 + 油标
     [[-0.62, 1.30, 0.16], [-0.62, 1.10, 0.12], [-0.95, 1.30, 0.13]].forEach(([z, y, len]) => {
-      g.add(RZ(cyl(0.016, 0.016, len, MACH, 0.235, y, z, 10)));    // 手柄杆（朝外）
-      const knob = cyl(0.030, 0.030, 0.045, IROND, 0.235 + len / 2, y, z, 12);
+      const stem = cyl(0.016, 0.016, len, MACH, 0.235 + len / 2, y, z, 10);
+      stem.rotation.z = Math.PI / 2;
+      g.add(stem);
+      const knob = cyl(0.030, 0.030, 0.048, BAK, 0.238 + len, y, z, 12);   // 黑胶木球头
       knob.rotation.z = Math.PI / 2;
       g.add(knob);
+      g.add(box(0.028, 0.058, 0.058, PBody, 0.238, y, z));                 // 手柄根部铸出凸台
     });
-    g.add(box(0.012, 0.10, 0.14, MAT.paper, 0.232, HY + 0.10, -0.72));  // 转速铭牌
+    // 转速铭牌：黄铜底板要比字牌大一圈，边缘露出铜色
+    g.add(box(0.004, 0.112, 0.152, MAT.brass, 0.231, HY + 0.10, -0.72));
+    g.add(box(0.006, 0.096, 0.136, MAT.paper, 0.234, HY + 0.10, -0.72));
     g.add(RZ(cyl(0.022, 0.022, 0.014, MAT.brass, 0.231, HY - 0.16, -0.66, 12))); // 油标
     // 后置电机 + 皮带罩
     g.add(rot(cyl(0.135, 0.135, 0.30, IROND, -0.44, 0.62, -0.86, 20), 'z', Math.PI / 2));
@@ -1581,53 +1619,74 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     g.add(box(0.11, 0.26, 0.44, PAINT, -0.315, 0.72, -0.86));
 
     /* ---------- 走刀箱（床头前端面）---------- */
-    g.add(box(0.30, 0.34, 0.16, IRON, -0.03, 0.68, -1.20));
+    g.add(box(0.30, 0.34, 0.16, PBody, -0.03, 0.68, -1.20));
     [0.60, 0.74].forEach((y) => {
-      g.add(RZ(cyl(0.014, 0.014, 0.12, MACH, 0.10, y, -1.24, 8)));
-      const k = cyl(0.026, 0.026, 0.035, IROND, 0.10 + 0.06, y, -1.24, 12);
+      const k = cyl(0.014, 0.014, 0.12, MACH, 0.145, y, -1.24, 8);
       k.rotation.z = Math.PI / 2; g.add(k);
+      const kn = cyl(0.026, 0.026, 0.036, BAK, 0.215, y, -1.24, 12);   // 黑胶木球头
+      kn.rotation.z = Math.PI / 2; g.add(kn);
     });
-    g.add(RZ(cyl(0.045, 0.045, 0.02, MACH, -0.03, 0.68, -1.29, 16)));  // 进给表盘
+    g.add(RZ(cyl(0.045, 0.045, 0.02, MACH, -0.03, 0.68, -1.29, 16)));      // 进给表盘
+    g.add(RZ(cyl(0.048, 0.048, 0.008, MAT.brass, -0.03, 0.68, -1.302, 16))); // 表盘铜圈
 
-    /* ---------- 溜板箱 + 刀架 ---------- */
+    /* ---------- 溜板 + 刀架 ---------- */
     const CAR = 0.26;
     // 溜板（骑在导轨上）
     const saddle = new T.Group();
     saddle.position.set(0, BEDY + 0.13, CAR);
-    saddle.add(box(0.40, 0.11, 0.34, IRON, 0, 0, 0));
-    saddle.add(box(0.42, 0.020, 0.36, IROND, 0, 0.055, 0));
+    saddle.add(box(0.40, 0.11, 0.34, PBody, 0, 0, 0));
+    saddle.add(box(0.42, 0.020, 0.36, PDark, 0, 0.055, 0));
+    // 与导轨的贴合面（亮钢，说明它真的骑在导轨上，不是浮着）
+    [-0.115, 0.115].forEach((x) => saddle.add(box(0.090, 0.012, 0.34, WAY, x, -0.058, 0)));
     // 横向滑板
-    saddle.add(box(0.30, 0.075, 0.30, IRON, 0, 0.095, 0.02));
+    saddle.add(box(0.30, 0.075, 0.30, PBody, 0, 0.095, 0.02));
     saddle.add(box(0.28, 0.012, 0.28, MACH, 0, 0.135, 0.02));
     // 小刀架
-    saddle.add(box(0.20, 0.075, 0.20, IRON, 0.01, 0.175, 0.0));
+    saddle.add(box(0.20, 0.075, 0.20, PBody, 0.01, 0.175, 0.0));
     // 四工位刀台
-    const post = box(0.15, 0.13, 0.15, IROND, 0.01, 0.265, 0.0);
+    const post = box(0.15, 0.13, 0.15, PDark, 0.01, 0.265, 0.0);
     post.rotation.y = 0.4; saddle.add(post);
     // 车刀（伸向工件）
     const tool = box(0.035, 0.030, 0.17, MACH, 0.01, 0.30, -0.10);
     tool.rotation.x = -0.12; saddle.add(tool);
-    saddle.add(box(0.05, 0.045, 0.03, IROND, 0.01, 0.305, 0.0));
-    // 横向进给手轮 + 小刀架手柄
+    saddle.add(box(0.05, 0.045, 0.03, PDark, 0.01, 0.305, 0.0));
+    // 横向进给手轮：做成辐条轮，不是一块圆饼
     const cw = new T.Group();
     cw.position.set(-0.30, 0.095, 0.02);
     cw.add(rot(cyl(0.012, 0.012, 0.10, MACH, 0.05, 0, 0, 8), 'z', Math.PI / 2));
-    cw.add(rot(cyl(0.075, 0.075, 0.014, IROND, 0.115, 0, 0, 20), 'z', Math.PI / 2));
-    cw.add(cyl(0.010, 0.010, 0.055, MACH, 0.115, 0.065, 0, 8));
-    cw.add(cyl(0.020, 0.020, 0.05, MAT.black, 0.115, 0.095, 0, 10));
+    cw.add(rot(cyl(0.075, 0.075, 0.012, PDark, 0.115, 0, 0, 20), 'z', Math.PI / 2));   // 轮缘
+    cw.add(rot(cyl(0.026, 0.026, 0.024, MACH, 0.118, 0, 0, 12), 'z', Math.PI / 2));    // 轮毂
+    for (let i = 0; i < 4; i++) {                                                       // 四根辐条
+      const a = (i / 4) * Math.PI * 2 + 0.4;
+      const sp = box(0.010, 0.100, 0.014, PDark, 0.113, Math.cos(a) * 0.05, Math.sin(a) * 0.05);
+      sp.rotation.z = a - Math.PI / 2;
+      cw.add(sp);
+    }
+    cw.add(cyl(0.010, 0.010, 0.055, MACH, 0.113, 0.062, 0, 8));                         // 手柄杆
+    cw.add(cyl(0.020, 0.020, 0.05, BAK, 0.113, 0.092, 0, 10));                          // 黑胶木握球
     saddle.add(cw);
     g.add(saddle);
 
     // 溜板箱（正面，带手动进给轮）
     const apron = new T.Group();
     apron.position.set(0.16, BEDY - 0.06, CAR);
-    apron.add(box(0.22, 0.34, 0.16, IRON, 0, -0.06, 0));
-    for (let i = 0; i < 3; i++)                                     // 三个操纵手柄
-      apron.add(RZ(cyl(0.013, 0.013, 0.10, MACH, 0.10, -0.02 + i * 0.09, -0.02, 8)));
+    apron.add(box(0.22, 0.34, 0.16, PBody, 0, -0.06, 0));
+    for (let i = 0; i < 3; i++) {                                     // 三个操纵手柄
+      const st = cyl(0.013, 0.013, 0.10, MACH, 0.155, -0.02 + i * 0.09, -0.02, 8);
+      st.rotation.z = Math.PI / 2; apron.add(st);
+      const kb = cyl(0.022, 0.022, 0.030, BAK, 0.205, -0.02 + i * 0.09, -0.02, 10);
+      kb.rotation.z = Math.PI / 2; apron.add(kb);
+    }
+    // 开合螺母手柄（溜板箱下部，横向长杆）
+    const nut = new T.Group();
+    nut.position.set(0.125, -0.195, 0.05);
+    nut.add(rot(cyl(0.012, 0.012, 0.16, MACH, 0, 0, 0, 8), 'z', Math.PI / 2));
+    nut.add(cyl(0.024, 0.024, 0.036, BAK, 0.10, 0, 0, 10));
+    apron.add(nut);
     const aw = new T.Group();
     aw.position.set(0.115, -0.13, 0.0);
     aw.add(rot(cyl(0.010, 0.010, 0.09, MACH, 0.045, 0, 0, 8), 'z', Math.PI / 2));
-    aw.add(rot(cyl(0.062, 0.062, 0.012, IROND, 0.10, 0, 0, 18), 'z', Math.PI / 2));
+    aw.add(rot(cyl(0.062, 0.062, 0.012, PDark, 0.10, 0, 0, 18), 'z', Math.PI / 2));
     aw.add(cyl(0.009, 0.009, 0.05, MACH, 0.10, 0.055, 0, 8));
     apron.add(aw);
     // 螺纹表
@@ -1636,17 +1695,19 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     /* ---------- 尾座 ---------- */
     const TS = 0.92;
-    g.add(box(0.34, 0.10, 0.34, IRON, 0, BEDY + 0.13, TS));          // 尾座底板
-    g.add(box(0.03, 0.14, 0.34, IROND, 0.175, BEDY + 0.10, TS));     // 压板
-    g.add(box(0.26, 0.24, 0.26, IRON, 0, BEDY + 0.30, TS));          // 尾座体
-    g.add(box(0.28, 0.03, 0.28, IROND, 0, BEDY + 0.42, TS));
+    g.add(box(0.34, 0.10, 0.34, PBody, 0, BEDY + 0.13, TS));          // 尾座底板
+    g.add(box(0.03, 0.14, 0.34, PDark, 0.175, BEDY + 0.10, TS));      // 压板
+    g.add(box(0.26, 0.24, 0.26, PBody, 0, BEDY + 0.30, TS));          // 尾座体
+    g.add(box(0.28, 0.03, 0.28, PDark, 0, BEDY + 0.42, TS));
     g.add(RZ(cyl(0.032, 0.032, 0.34, MACH, 0, HY, TS - 0.10, 16)));   // 套筒
-    g.add(RZ(cyl(0.050, 0.050, 0.03, MACH, 0, HY, TS - 0.27, 16)));   // 顶尖
+    // 顶尖：圆锥，不是一根圆柱（原来一眼假）
+    g.add(RZ(cyl(0.046, 0.007, 0.078, MACH, 0, HY, TS - 0.276, 14)));
+    g.add(RZ(cyl(0.046, 0.046, 0.012, PDark, 0, HY, TS - 0.233, 16))); // 顶尖根部台阶
     // 尾座手轮
     const tw = new T.Group();
     tw.position.set(0, HY, TS + 0.20);
     tw.add(RZ(cyl(0.020, 0.020, 0.16, MACH, 0, 0, 0, 10)));
-    tw.add(RZ(cyl(0.082, 0.082, 0.016, IROND, 0, 0, 0.09, 20)));
+    tw.add(RZ(cyl(0.082, 0.082, 0.014, PDark, 0, 0, 0.09, 20)));
     for (let i = 0; i < 3; i++) {
       const a = (i / 3) * Math.PI * 2;
       tw.add(cyl(0.008, 0.008, 0.06, MACH, Math.cos(a) * 0.07, Math.sin(a) * 0.07, 0.10, 8));
@@ -1654,16 +1715,44 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     g.add(tw);
     // 尾座锁紧手柄
     g.add(RZ(cyl(0.013, 0.013, 0.14, MACH, 0.16, BEDY + 0.26, TS + 0.02, 8)));
+    g.add(cyl(0.020, 0.020, 0.034, BAK, 0.16, BEDY + 0.26, TS + 0.10, 10));
 
     /* ---------- 丝杠 / 光杠 / 操纵杆 ---------- */
     g.add(RZ(cyl(0.024, 0.024, 2.10, MACH, -0.235, 0.62, 0.02, 12)));   // 丝杠
-    for (let i = 0; i < 26; i++) {                                        // 螺纹（细环）
-      g.add(RZ(cyl(0.027, 0.027, 0.004, IROND, -0.235, 0.62, -0.99 + i * 0.08, 10)));
+    for (let i = 0; i < 52; i++) {                                        // 螺纹（细环，加密后像真螺纹）
+      g.add(RZ(cyl(0.027, 0.027, 0.004, MACH, -0.235, 0.62, -1.01 + i * 0.04, 10)));
     }
+    // 丝杠两端支撑座 —— 原来丝杠是悬空的，像一根插着的棍
+    [1.03, -1.00].forEach((z) => {
+      g.add(box(0.088, 0.125, 0.052, PBody, -0.235, 0.62, z));
+      g.add(RZ(cyl(0.031, 0.031, 0.026, PDark, -0.235, 0.62, z + (z > 0 ? -0.033 : 0.033), 12)));
+    });
     g.add(RZ(cyl(0.017, 0.017, 2.10, MACH, -0.185, 0.68, 0.02, 10)));    // 光杠
     g.add(RZ(cyl(0.014, 0.014, 2.10, IROND, -0.150, 0.74, 0.02, 8)));    // 操纵杆
     // 挂轮箱（床头左侧）
-    g.add(box(0.10, 0.30, 0.34, IROND, -0.14, 0.52, -1.24));
+    g.add(box(0.10, 0.30, 0.34, PBody, -0.14, 0.52, -1.24));
+    g.add(box(0.014, 0.245, 0.285, PDark, -0.196, 0.52, -1.24));         // 挂轮箱盖板
+
+    /* ---------- 冷却液管 + 卡盘扳手（车间里最"活"的两件小东西）---------- */
+    (function coolant() {
+      const c = new T.Group();
+      c.position.set(0.20, 1.42, -0.50);
+      const h1 = cyl(0.010, 0.010, 0.12, MACH, 0.06, 0, 0, 8);
+      h1.rotation.z = Math.PI / 2; c.add(h1);                          // ① 出箱，沿 +x
+      c.add(cyl(0.010, 0.010, 0.17, MACH, 0.12, -0.085, 0, 8));        // ② 下垂
+      const h2 = cyl(0.010, 0.010, 0.14, MACH, 0.12, -0.168, -0.07, 8);
+      h2.rotation.x = Math.PI / 2; c.add(h2);                          // ③ 转向工件，沿 -z
+      c.add(cyl(0.012, 0.008, 0.030, MAT.brass, 0.12, -0.188, -0.145, 8)); // ④ 铜喷嘴
+      g.add(c);
+    })();
+    (function chuckKey() {
+      const k = new T.Group();
+      k.position.set(0.246, 1.32, -0.92);
+      k.add(box(0.012, 0.012, 0.13, MACH, 0, 0, 0));                   // 横杆
+      k.add(box(0.012, 0.085, 0.012, MACH, 0, -0.045, 0.058));         // 竖柄
+      k.add(box(0.017, 0.017, 0.017, MAT.brass, 0, 0, -0.072));        // 四方头
+      g.add(k);
+    })();
 
     /* ---------- 台面上的铁屑/油渍 ---------- */
     for (let i = 0; i < 12; i++) {
@@ -4253,6 +4342,17 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       autoSpin = false;
       camTheta = CAM_WOOD.theta; camPhi = CAM_WOOD.phi; camRadius = CAM_WOOD.r;
       camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
+    }
+    // #dev6：车床特写，用于逐件打磨（不影响玩家）
+    if (H.indexOf('#dev6') === 0) {
+      startGame(1, true);
+      state.cash = 200000;
+      EQUIP_DEF.forEach((e) => (state.equip[e.id] = true));
+      SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
+      syncEquipMeshes(); renderAll();
+      autoSpin = false;
+      camTheta = 1.88; camPhi = 1.20; camRadius = 2.3;
+      camTarget = { x: -3.75, y: 1.02, z: 3.35 };
     }
     if (H.indexOf('#dev4') === 0) {
       startGame(1, true);
