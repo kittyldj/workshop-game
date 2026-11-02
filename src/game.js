@@ -101,7 +101,7 @@
   const IS_TOUCH = (navigator.maxTouchPoints || 0) > 1 ||
     !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
 
-  let settings = { q: 2, vol: 0.55, sfx: true, theme: 'woodshop' };
+  let settings = { q: 2, vol: 0.55, sfx: true, theme: 'woodshop', wall: 1 };
 
   function loadSettings() {
     try {
@@ -2240,6 +2240,16 @@
       const floorMat = new T.MeshStandardMaterial({ map: concreteTex, color: 0x4b4740, roughness: 0.62, metalness: 0.05, normalMap: MAT.userData.plasterNormal, normalScale: new T.Vector2(0.5, 0.5) });
       const ceilMat = new T.MeshStandardMaterial({ color: 0xb2a996, roughness: 0.95, metalness: 0 });
 
+      /* 外墙的"幽灵"版本：半透明 + 不写深度。
+         玩家绕到侧面 / 镜头被夹到墙边时，实体墙会整块糊住画面；
+         换成它之后墙还在（有轮廓，不至于失去空间感），但挡不住视线。 */
+      wallGhostMat = wallMat.clone();
+      wallGhostMat.transparent = true;
+      wallGhostMat.opacity = 0.13;
+      wallGhostMat.depthWrite = false;
+      wallGhostMat.side = T.DoubleSide;
+      wallMatSolid = wallMat;
+
       const trimMat = new T.MeshStandardMaterial({ color: 0x6a4f34, roughness: 0.86, metalness: 0.04 });
       const pegMat = new T.MeshStandardMaterial({ map: pegTex, roughness: 0.9, metalness: 0.02 });
 
@@ -2323,6 +2333,7 @@
         if (ry) m.rotation.y = ry;
         m.castShadow = true; m.receiveShadow = true;
         PROPS.add(m);
+        outerWalls.push(m);            // 单独收集，供「外墙透明」开关切换
         return m;
       }
       wallPanel((WX0 - RX) / 2, H / 2, ZB, RX + WX0, H);
@@ -3730,6 +3741,19 @@
       camRadius = exitDist(LT, dx / L, dy / L, dz / L) + 0.55;
       place();
     }
+    /* 最后一道闸：就算机位算歪了（设备模型以后改大、或某台设备挤在一起），
+       只要相机落进设备包围盒、或者贴到墙边，就立刻取消聚焦退回全景。
+       玩家永远不会被锁在一块铁皮内壁前面。 */
+    if (focus && focus.to) {
+      const p = camera.position;
+      const nearWall = p.x < ROOM_BOX.x0 + 0.20 || p.x > ROOM_BOX.x1 - 0.20 ||
+                       p.z < ROOM_BOX.z0 + 0.20 || p.z > ROOM_BOX.z1 - 0.20;
+      // 任何一台设备的盒里都算被遮住（不只是聚焦的那台）
+      if (nearWall || inAnyEquipBox(p.x, p.y, p.z)) {
+        cancelFocus();
+        toast('镜头被挡住了，已退回全景', 'bad');
+      }
+    }
     camera.lookAt(LT.x, LT.y, LT.z);
 
     // 聚焦补光：淡入淡出，位置贴在相机略上方（像操作者身上的头灯）
@@ -4232,6 +4256,18 @@
   let camHome = null;   // 聚焦被玩家打断后的"回家"过渡：target → 房间中心、半径 → 全景
   let camNoGuard = false;  // 调试机位专用：关掉"相机不出屋"兜底（#dev6 之类刻意贴脸的机位）
 
+  let outerWalls = [];        // 外墙 mesh（不含天花板：天花板要挡光，不能透明）
+  let wallGhostMat = null;    // 半透明墙材质
+  let wallMatSolid = null;    // 实体墙材质
+
+  /* 外墙透明开关：墙还在、只是挡不住视线。
+     这既是玩家要的观感选项，也是"相机贴到墙边就被糊住"的最后一道保险。 */
+  function applyWalls() {
+    const ghost = settings.wall !== 0;
+    if (!outerWalls.length || !wallGhostMat || !wallMatSolid) return;
+    outerWalls.forEach((m) => { m.material = ghost ? wallGhostMat : wallMatSolid; });
+  }
+
   /* 房间外壳（比墙体略内缩）。
      默认机位在屋外，靠背面剔除看进屋 —— 这是刻意的构图方式；
      一旦相机落进屋壳内，看到的就是墙的背面，画面糊成一块黑，
@@ -4262,54 +4298,101 @@
     return u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
   }
 
-  // 把"看哪儿"换算成一组相机参数：从设备正面推近，再夹进房间内
+  /* 所有设备的包围盒（缓存）。用来判断"这个机位是不是落在别的设备里面"。
+     只避开自己那台不够 —— 实测台钻的机位会退到数控机顶上，一样是整屏黑。
+     盒的对角超过 6.5m 一律丢弃：那说明这个 Group 里混进了场景级物件，盒不可信。 */
+  let equipBoxes = null, equipBoxKey = '';
+  function getEquipBoxes() {
+    const key = EQUIP_DEF.filter((e) => equipMeshes[e.id]).map((e) => e.id).join(',') + '|' +
+                Object.keys(stations).filter((k) => stations[k]).join(',');
+    if (equipBoxes && equipBoxKey === key) return equipBoxes;
+    const out = [];
+    const push = (h) => {
+      if (!h) return;
+      h.updateMatrixWorld(true);
+      const b = new T.Box3().setFromObject(h);
+      if (!isFinite(b.min.x)) return;
+      const s = b.getSize(new T.Vector3());
+      if (Math.hypot(s.x, s.y, s.z) > 6.5) return;
+      out.push(b.expandByScalar(0.22));
+    };
+    EQUIP_DEF.forEach((e) => push(equipMeshes[e.id]));
+    Object.keys(stations).forEach((k) => push(stations[k]));
+    equipBoxes = out; equipBoxKey = key;
+    return out;
+  }
+
+  function inAnyEquipBox(x, y, z) {
+    const list = getEquipBoxes();
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i];
+      if (x > b.min.x && x < b.max.x && y > b.min.y && y < b.max.y && z > b.min.z && z < b.max.z) return true;
+    }
+    return false;
+  }
+
+  /* 把"看哪儿"换算成一组相机参数。
+     ⚠️ 这条路上踩过三次坑，前两次都是同一个错误思路：用"离设备多远"判断安全。
+     设备是 2~3 米的大箱体，退 2 米仍在机箱里；而从"设备正前方"退，撞墙就被
+     夹回来，结果贴在自己或隔壁设备的铁皮上 —— 整屏黑，旋转只是在箱内打转。
+     现在的做法：
+       ① 方向优先取「设备锚点 → 房间中心」，这个方向永远朝空地，不会撞墙也不穿设备；
+       ② 距离按 2.6 → 4.6 逐档试，要求落在房间内且不在**任何**设备盒里；
+       ③ 都不行才试设备正前方（贴着墙的设备常常只有这一条路），再不行就不聚焦。 */
   function focusPreset(id) {
     const def = FOCUS_DEF[id];
     const holder = (id === 'cab' || id === 'cad') ? stations[id] : equipMeshes[id];
     if (!def || !holder) return null;
     holder.updateMatrixWorld(true);
+
     const v = new T.Vector3(def.a[0], def.a[1], def.a[2]);
-    holder.localToWorld(v);                        // 设备都带 rotation.y，必须换算到世界坐标
+    holder.localToWorld(v);                        // 设备带 rotation.y，必须换算到世界坐标
 
-    const ry = holder.rotation.y || 0;
-    const fx = Math.sin(ry), fz = Math.cos(ry);    // 设备正面朝向（模型局部 +z）
-    const cl = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+    const own = new T.Box3().setFromObject(holder);
+    const ownOk = isFinite(own.min.x) &&
+                  Math.hypot(own.max.x - own.min.x, own.max.y - own.min.y, own.max.z - own.min.z) <= 6.5;
+    if (ownOk) own.expandByScalar(0.30);
 
-    /* 安全距离：这条是"工作时突然全黑"的根因修复。
-       原来的做法是先按 def.d 算一个机位，再用 clamp 压进房间。
-       但设备贴墙时（车床贴前墙、控制柜贴后墙），压回来的点可能跟目标
-       几乎重合 —— 实测 r 能小到 0.45m，镜头等于贴在设备表面/钻进内部，
-       看到的是一堵内壁，于是整屏全黑；这时旋转只是在原地打转，
-       玩家会觉得"转不动、怎么都恢复不了"。
-       所以：算完必须校验距离，不够就换方向，再不够就放弃聚焦保持原视角。 */
-    const MINR = 2.05;
-    const X0 = -3.55, X1 = 3.55, Z0 = -4.30, Z1 = 3.30, Y0 = 0.90, Y1 = 2.60;
+    const cx0 = ROOM_BOX.x0 + 0.55, cx1 = ROOM_BOX.x1 - 0.55;
+    const cz0 = ROOM_BOX.z0 + 0.55, cz1 = ROOM_BOX.z1 - 0.55;
 
-    let cx = cl(v.x + fx * def.d, X0, X1);
-    let cy = cl(v.y + def.up, Y0, Y1);
-    let cz = cl(v.z + fz * def.d, Z0, Z1);
-    let r = Math.hypot(cx - v.x, cy - v.y, cz - v.z);
-
-    if (r < MINR) {
-      // 正前方被墙夹短了：改从"设备指向房间中心"的方向退，这个方向永远开着。
-      // 退得比 MINR 更远一点（2.6），因为这类设备本身是框架/大箱体，
-      // 退到刚好 MINR 会像"钻进机箱里往外看"。
-      const bx = 0 - v.x, bz = 0 - v.z;
-      const L = Math.hypot(bx, bz) || 1;
-      const want = 2.60;
-      cx = cl(v.x + bx / L * want, X0, X1);
-      cy = cl(v.y + 0.60, Y0, Y1);
-      cz = cl(v.z + bz / L * want, Z0, Z1);
-      r = Math.hypot(cx - v.x, cy - v.y, cz - v.z);
-      if (r < MINR) return null;                   // 房间太挤就干脆不聚焦，保持玩家原视角
-    }
-    const dx = cx - v.x, dy = cy - v.y, dz = cz - v.z;
-    return {
-      theta: Math.atan2(dx, dz),
-      phi: Math.acos(Math.min(1, Math.max(-1, dy / r))),
-      r,
-      t: { x: v.x, y: v.y, z: v.z }
+    const tryAt = (px, py, pz, strict) => {
+      if (px < cx0 || px > cx1 || pz < cz0 || pz > cz1) return null;
+      if (ownOk && px > own.min.x && px < own.max.x && py > own.min.y && py < own.max.y && pz > own.min.z && pz < own.max.z) return null;
+      if (strict && inAnyEquipBox(px, py, pz)) return null;
+      const dx = px - v.x, dy = py - v.y, dz = pz - v.z;
+      const r = Math.hypot(dx, dy, dz);
+      if (r < 2.2) return null;
+      return {
+        theta: Math.atan2(dx, dz),
+        phi: Math.acos(clamp(dy / r, -1, 1)),
+        r,
+        t: { x: v.x, y: v.y, z: v.z },
+        bb: ownOk ? own.clone() : null
+      };
     };
+
+    // ① 朝房间中心退（严格：避开所有设备盒）
+    const bx = -v.x, bz = -v.z;
+    const BL = Math.hypot(bx, bz) || 1;
+    const ux = bx / BL, uz = bz / BL;
+    for (let d = 2.6; d <= 4.7; d += 0.3) {
+      const got = tryAt(v.x + ux * d, clamp(v.y + 0.55, 1.0, 2.5), v.z + uz * d, true);
+      if (got) return got;
+    }
+    // ② 设备正前方（严格）
+    const ry = holder.rotation.y || 0;
+    for (let d = 2.4; d <= 4.0; d += 0.3) {
+      const got = tryAt(v.x + Math.sin(ry) * d, clamp(v.y + (def.up || 0.4), 1.0, 2.5), v.z + Math.cos(ry) * d, true);
+      if (got) return got;
+    }
+    // ③ 宽松重来：只保证不出房间、不在自己壳里。朝中心的方向基本是空地，
+    //    真要是压在隔壁设备上，开局后每帧的健康检查会立刻把它退回来。
+    for (let d = 2.8; d <= 4.7; d += 0.3) {
+      const got = tryAt(v.x + ux * d, clamp(v.y + 0.55, 1.0, 2.5), v.z + uz * d, false);
+      if (got) return got;
+    }
+    return null;                                   // 实在放不下 → 不聚焦，保持玩家视角
   }
 
   function startFocus(id, ms) {
@@ -4977,6 +5060,9 @@
       Object.keys(THEMES).map((k) =>
         '<button class="seg' + (settings.theme === k ? ' on' : '') + '" data-theme="' + k + '" title="' + THEMES[k].label + '">' +
         THEMES[k].short + '</button>').join('') + '</span></div>' +
+      '<div class="rowline"><span class="lb">外墙</span><span class="vl">' +
+      '<button class="seg' + (settings.wall !== 0 ? ' on' : '') + '" data-wall="1">透明</button>' +
+      '<button class="seg' + (settings.wall === 0 ? ' on' : '') + '" data-wall="0">实体</button></span></div>' +
       '<div class="rowline"><span class="lb">窗口</span><span class="vl"><button class="seg" data-full="1">全屏 / 还原</button></span></div>' +
       '<div class="menu" style="margin-top:20px">' +
       '<button class="menu-btn" data-shell="back"><span class="idx">←</span>返回</button></div>' +
@@ -5169,6 +5255,7 @@
       if (t.dataset.theme) { settings.theme = t.dataset.theme; saveSettings(); applyTheme(settings.theme); shellSettings(); return; }
       if (t.dataset.q) { settings.q = +t.dataset.q; saveSettings(); applyQuality(); shellSettings(); return; }
       if (t.dataset.sfx) { settings.sfx = t.dataset.sfx === '1'; saveSettings(); SFX.apply(); shellSettings(); return; }
+      if (t.dataset.wall !== undefined) { settings.wall = t.dataset.wall === '1' ? 1 : 0; saveSettings(); applyWalls(); shellSettings(); return; }
       if (t.dataset.full) { toggleFull(); return; }
       const s = t.dataset.shell;
       if (s === 'new') shellNew();
@@ -5224,6 +5311,7 @@
     bind();
     initThree();
     applyQuality();
+    applyWalls();          // 按设置把外墙切成透明或实体（外墙在 initThree 里才建出来）
     showTitle();
     // 开发直达：#dev 开新档；#dev2 给钱给设备；#dev3 台钻特写；加 &tab=equip|works 切标签页
     const H = location.hash, tabHit = H.match(/tab=(skills|equip|works)/);
