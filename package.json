@@ -7,9 +7,9 @@
     "build": "node build.js"
   },
   "license": "AGPL-3.0-or-later",
-  "author": "cody_lau <26552418@qq.com> (https://github.com/cody_lau)",
+  "author": "cody_lau <kittyldj@163.com> (https://github.com/kittyldj)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cody_lau/workshop-game"
+    "url": "https://github.com/kittyldj/workshop-game"
   }
 }
