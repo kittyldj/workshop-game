@@ -93,6 +93,13 @@
   .card .row .spacer{flex:1;}
   .card.hot{border-color:rgba(255,45,149,.45);}
   .card.done{opacity:.5;}
+  /* 条件不够的单：虚线边 + 压暗，一眼看出"这张现在接不了" */
+  .card.locked{opacity:.66; border-style:dashed; border-color:rgba(255,255,255,.10); background:rgba(255,255,255,.012);}
+  .card .miss{margin-top:6px; font-size:10px; line-height:1.5; color:#e58aac; letter-spacing:.02em;}
+  .btn.dim{border-color:rgba(255,255,255,.14); color:#7b8a9c; background:rgba(255,255,255,.03);}
+  .btn.dim:hover{background:rgba(255,255,255,.06); box-shadow:none; color:#8c9aab;}
+  .hint{margin-bottom:8px; padding:7px 9px; border-radius:7px; font-size:10.5px; line-height:1.55;
+    color:#c8b06a; background:rgba(255,209,102,.07); border:1px solid rgba(255,209,102,.22);}
   .bar{height:4px; border-radius:2px; background:rgba(255,255,255,.09); margin-top:7px; overflow:hidden;}
   .bar > i{display:block; height:100%; background:linear-gradient(90deg,var(--cy),var(--gn));
     box-shadow:0 0 8px var(--cy); transition:width .3s;}

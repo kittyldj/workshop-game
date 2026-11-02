@@ -93,6 +93,13 @@
   .card .row .spacer{flex:1;}
   .card.hot{border-color:rgba(255,45,149,.45);}
   .card.done{opacity:.5;}
+  /* 条件不够的单：虚线边 + 压暗，一眼看出"这张现在接不了" */
+  .card.locked{opacity:.66; border-style:dashed; border-color:rgba(255,255,255,.10); background:rgba(255,255,255,.012);}
+  .card .miss{margin-top:6px; font-size:10px; line-height:1.5; color:#e58aac; letter-spacing:.02em;}
+  .btn.dim{border-color:rgba(255,255,255,.14); color:#7b8a9c; background:rgba(255,255,255,.03);}
+  .btn.dim:hover{background:rgba(255,255,255,.06); box-shadow:none; color:#8c9aab;}
+  .hint{margin-bottom:8px; padding:7px 9px; border-radius:7px; font-size:10.5px; line-height:1.55;
+    color:#c8b06a; background:rgba(255,209,102,.07); border:1px solid rgba(255,209,102,.22);}
   .bar{height:4px; border-radius:2px; background:rgba(255,255,255,.09); margin-top:7px; overflow:hidden;}
   .bar > i{display:block; height:100%; background:linear-gradient(90deg,var(--cy),var(--gn));
     box-shadow:0 0 8px var(--cy); transition:width .3s;}
@@ -549,6 +556,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         }, i * gap);
       }
     },
+    // 车床：主轴低频嗡鸣 + 断续的切削屑声（跟台钻的"一下一下"明显不同）
+    lathe(ms) {
+      if (!this.ready || !settings.sfx) return;
+      this.tone(98, 0.95, 'sawtooth', 0.030, 86);
+      const n = 5, gap = Math.max(150, (ms || 1500) / n);
+      for (let i = 0; i < n; i++) setTimeout(() => this.noise(0.10, 0.026, 3400), i * gap);
+    },
     ambient(on) {
       if (!this.ready) return;
       if (on && !this.amb) {
@@ -629,7 +643,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   let camTheta = -0.16, camPhi = 0.94, camRadius = 17.5;
   let autoSpin = true, lastInteract = 0;
   let equipMeshes = {};
-  let anim = { drill: 0, drillDur: 1600 };
+  let anim = { drill: 0, drillDur: 1600, lathe: 0, latheDur: 1500 };
   let lastT = 0;
   let camTarget = null;   // 开发用：把镜头钉在某台设备上
   let qualityLevel = 2;
@@ -1600,6 +1614,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     // 工件（车到一半的轴）
     chuck.add(RZ(cyl(0.036, 0.036, 0.40, MACH, 0, 0, 0.32, 18)));
     chuck.add(RZ(cyl(0.030, 0.030, 0.10, MAT.brass, 0, 0, 0.52, 14)));  // 铜环
+    // 工件表面一条键槽标记：圆柱本身是对称的，转起来看不出动，
+    // 全靠这条黑线 + 三爪才让人看见"卡盘在转"
+    chuck.add(box(0.009, 0.008, 0.36, MAT.black, 0, 0.034, 0.30));
+    chuck.add(box(0.007, 0.007, 0.030, MAT.black, 0, 0.030, 0.57));     // 端面记号
     g.add(chuck);
 
     // 主轴箱侧面的变速手柄（朝外伸出）+ 铭牌 + 油标
@@ -1721,10 +1739,14 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     g.add(cyl(0.020, 0.020, 0.034, BAK, 0.16, BEDY + 0.26, TS + 0.10, 10));
 
     /* ---------- 丝杠 / 光杠 / 操纵杆 ---------- */
-    g.add(RZ(cyl(0.024, 0.024, 2.10, MACH, -0.235, 0.62, 0.02, 12)));   // 丝杠
+    // 丝杠单独成组：只有绕自身轴（z）自转，螺纹环才会跟着转，看出"进给在走"
+    const screw = new T.Group();
+    screw.position.set(-0.235, 0.62, 0.02);
+    screw.add(RZ(cyl(0.024, 0.024, 2.10, MACH, 0, 0, 0, 12)));
     for (let i = 0; i < 52; i++) {                                        // 螺纹（细环，加密后像真螺纹）
-      g.add(RZ(cyl(0.027, 0.027, 0.004, MACH, -0.235, 0.62, -1.01 + i * 0.04, 10)));
+      screw.add(RZ(cyl(0.027, 0.027, 0.004, MACH, 0, 0, -1.03 + i * 0.04, 10)));
     }
+    g.add(screw);
     // 丝杠两端支撑座 —— 原来丝杠是悬空的，像一根插着的棍
     [1.03, -1.00].forEach((z) => {
       g.add(box(0.088, 0.125, 0.052, PBody, -0.235, 0.62, z));
@@ -1765,7 +1787,24 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       c.castShadow = false;
       g.add(c);
     }
+    /* ---------- 加工铁屑（车削时从刀尖甩出，跑在 renderFrame 里）---------- */
+    const chips = [];
+    for (let i = 0; i < 12; i++) {
+      const c = box(0.011, 0.004, 0.020, MACH, 0, 0, 0);
+      c.visible = false;
+      c.castShadow = false;
+      c.userData = { v: new T.Vector3(), life: 0 };
+      g.add(c); chips.push(c);
+    }
+
+    // 运行时动画要靠这些引用：卡盘自转 / 溜板走刀 / 手轮 / 丝杠 / 铁屑
     g.userData.chuck = chuck;
+    g.userData.saddle = saddle;
+    g.userData.cw = cw;              // 横向进给手轮
+    g.userData.screw = screw;        // 丝杠
+    g.userData.chips = chips;
+    g.userData.chipT = 0;
+    g.userData.carZ = CAR;           // 溜板原位，停机要回到这里
     return g;
   }
 
@@ -3314,6 +3353,17 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     c.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
   }
 
+  // 车床铁屑：从刀尖（跟着溜板走）甩向操作者一侧
+  function spawnLatheChip(ud) {
+    const c = ud.chips.find((x) => x.userData.life <= 0);
+    if (!c) return;
+    c.visible = true;
+    c.position.set(0.042, 1.185, ud.saddle.position.z - 0.10);
+    c.userData.v.set(0.18 + Math.random() * 0.55, 0.30 + Math.random() * 0.55, (Math.random() - 0.5) * 0.7);
+    c.userData.life = 0.55 + Math.random() * 0.35;
+    c.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+  }
+
   function renderFrame(t) {
     const dt = Math.min(0.05, lastT ? Math.max(0.001, t - lastT) : 0.016);
     lastT = t;
@@ -3377,6 +3427,54 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
             c.position.y = 0.445;
             c.userData.v.y *= -0.32;
             c.userData.v.x *= 0.45; c.userData.v.z *= 0.45;
+          }
+          if (c.userData.life <= 0) c.visible = false;
+        });
+      }
+    }
+
+    // ---- 车床：卡盘自转 + 溜板走刀 + 手轮/丝杠 + 铁屑 ----
+    const lg = equipMeshes.lathe;
+    if (lg && lg.children[0]) {
+      const ud = lg.children[0].userData;
+      if (ud && ud.chuck && ud.saddle) {
+        const now = performance.now();
+        const on = anim.lathe > now;
+        const p = on ? clamp(1 - (anim.lathe - now) / anim.latheDur, 0, 1) : 0;
+
+        // 主轴：工作时转起来，停机后靠惯性慢慢停 —— 一刀切到 0 会很假
+        const cur = ud.spin || 0;
+        const nv = cur + ((on ? 17 : 0) - cur) * Math.min(1, dt * (on ? 6 : 1.7));
+        ud.spin = nv;
+        if (nv > 0.02) ud.chuck.rotation.z += dt * nv;
+
+        // 溜板：沿床身往复走刀（这是最容易被看见的动作），停机回原位
+        // 一次开工走一个来回：sin(p*2π) 在 p 从 0 到 1 时正好去而复返
+        const walk = on ? Math.sin(p * Math.PI * 2) * 0.22 : 0;
+        const wantZ = ud.carZ + walk;
+        ud.dbgP = p; ud.dbgWant = wantZ;     // 调试入口读用
+        ud.dbgWalkMax = Math.max(ud.dbgWalkMax || 0, Math.abs(walk));
+        ud.saddle.position.z += (wantZ - ud.saddle.position.z) * Math.min(1, dt * 9);
+
+        // 横向进给手轮 + 丝杠：只在切削时转
+        if (on) {
+          ud.cw.rotation.x += dt * 2.1;
+          if (ud.screw) ud.screw.rotation.z += dt * 6.2;
+        }
+
+        // 铁屑：从刀尖甩出，落到接屑盘上弹一下
+        ud.chipT = (ud.chipT || 0) + dt;
+        if (on && ud.chipT > 0.05 && nv > 6) { ud.chipT = 0; spawnLatheChip(ud); }
+        ud.chips.forEach((c) => {
+          if (c.userData.life <= 0) return;
+          c.userData.life -= dt;
+          c.userData.v.y -= 9.2 * dt;
+          c.position.addScaledVector(c.userData.v, dt);
+          c.rotation.x += dt * 9; c.rotation.z += dt * 7;
+          if (c.position.y < 0.672) {                       // 接屑盘底面
+            c.position.y = 0.672;
+            c.userData.v.y *= -0.30;
+            c.userData.v.x *= 0.40; c.userData.v.z *= 0.40;
           }
           if (c.userData.life <= 0) c.visible = false;
         });
@@ -3582,14 +3680,19 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     setTimeout(() => el.remove(), 2400);
   }
 
-  // 让某台设备"动起来"（目前实现了台钻；以后加车床/焊机照这个模式扩）
+  // 让某台设备"动起来"（已实现：台钻、车床；焊机/数控照这个模式扩）
   function animEquip(id, ms) {
     if (!state || !state.equip[id] || !equipMeshes[id]) return false;
     anim[id] = performance.now() + (ms || 1600);
-    if (id === 'drill') anim.drillDur = ms || 1600;
-    if (id === 'drill' && SFX.drill) SFX.drill(ms || 1600);
+    if (id === 'drill') { anim.drillDur = ms || 1600; if (SFX.drill) SFX.drill(ms || 1600); }
+    if (id === 'lathe') { anim.latheDur = ms || 1500; if (SFX.lathe) SFX.lathe(ms || 1500); }
     lastInteract = performance.now();
     return true;
+  }
+
+  // 一张活可能同时用到多台机器（比如车完再钻），凡是点到的都让它转起来
+  function animEquipList(list, ms) {
+    (list || []).forEach((id) => animEquip(id, ms));
   }
 
   function skillLv(id) { return state.skills[id] || 0; }
@@ -3602,6 +3705,23 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     let g = 0;
     for (const k in req) g += Math.max(0, req[k] - skillLv(k));
     return g;
+  }
+
+  // 这单还差什么才能接：技能不够 / 缺设备，逐条列成人话
+  function orderBlockers(o) {
+    const out = [];
+    Object.keys(o.req || {}).forEach((k) => {
+      const need = o.req[k], have = skillLv(k);
+      if (have >= need) return;
+      const s = SKILL_DEF.find((x) => x.id === k);
+      out.push((s ? s.name : k) + ' ' + have + '/' + need + ' 级');
+    });
+    (o.equip || []).forEach((e) => {
+      if (state.equip[e]) return;
+      const d = EQUIP_DEF.find((x) => x.id === e);
+      out.push('没有「' + (d ? d.name : e) + '」');
+    });
+    return out;
   }
 
   function advanceTime() {
@@ -3687,7 +3807,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (state.orders.length >= 3) { toast('手上最多接 3 单', 'bad'); return; }
     const idx = state.board.findIndex((o) => o.uid === uid);
     if (idx < 0) return;
-    const o = state.board.splice(idx, 1)[0];
+    const o = state.board[idx];
+    // 条件不够的单不许接：接了也干不动，只会白占一个订单位、最后交付出次品
+    const blockers = orderBlockers(o);
+    if (blockers.length) {
+      toast('接不了「' + o.name + '」，还差：' + blockers.join('、'), 'bad');
+      log('「' + o.name + '」够不上条件：' + blockers.join('、') + '。', 'w');
+      return;
+    }
+    state.board.splice(idx, 1);
     o.takenDay = state.day;
     state.orders.push(o);
     state.board = genBoard().slice(0, 3);
@@ -3711,8 +3839,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     o.done = Math.min(o.steps, o.done + eff);
     const left = Math.ceil(o.steps - o.done);
     log('干了一格「' + o.name + '」，还差 ' + left + ' 格。');
-    // 用到台钻的活，直接在 3D 车间里开机
-    if ((o.equip || []).indexOf('drill') >= 0) animEquip('drill', 1500);
+    // 用到的机器直接在 3D 车间里开机（一台活可能同时要用车床和台钻）
+    animEquipList(o.equip, 1500);
     advanceTime();
     if (o.done >= o.steps) toast('「' + o.name + '」可以交了', 'good');
   }
@@ -3812,7 +3940,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       log('<b>开工</b> 「' + p.name + '」下料，材料 ' + fmt(p.cost) + '。');
     }
     state.works[workId][partId] = Math.min(p.steps, prog + 1);
-    if ((p.equip || []).indexOf('drill') >= 0) animEquip('drill', 1400);
+    animEquipList(p.equip, 1400);
     if (state.works[workId][partId] >= p.steps) {
       log('<b>完成</b> 「' + p.name + '」做出来了。', 'g');
       toast('「' + p.name + '」完成', 'good');
@@ -3872,19 +4000,31 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   function renderBoard() {
     const box = $('#l-orders');
     if (!state.board || !state.board.length) { box.innerHTML = '<div class="empty">今天没新单</div>'; return; }
-    box.innerHTML = state.board.map((o) => {
-      const gap = skillGap(o.req) + missingEquip(o.equip).length;
-      return '<div class="card ' + (gap === 0 ? 'hot' : '') + '">' +
+    const html = state.board.map((o) => {
+      const blockers = orderBlockers(o);
+      const locked = blockers.length > 0;
+      return '<div class="card ' + (locked ? 'locked' : 'hot') + '">' +
         '<div class="t">' + o.name +
-        (gap === 0 ? ' <span class="pill ok">能接</span>' : '<span class="pill bad">条件不足</span>') + '</div>' +
+        (locked
+          ? '<span class="pill bad">接不了</span>'
+          : '<span class="pill ok">能接</span>') + '</div>' +
         '<div class="d">' + o.desc + '</div>' +
+        (locked
+          ? '<div class="miss">还差：' + blockers.join('、') + '</div>'
+          : '') +
         '<div class="row"><span class="money">' + fmt(o.reward) + '</span>' +
         '<span class="days">' + o.days + ' 天</span><span>' + o.steps + ' 格</span>' +
         '<span class="spacer"></span>' +
-        '<button class="btn sm" data-act="take" data-id="' + o.uid + '">接下</button></div>' +
+        '<button class="btn sm' + (locked ? ' dim' : '') + '" data-act="take" data-id="' + o.uid + '">' +
+        (locked ? '接不了' : '接下') + '</button></div>' +
         '<div class="row" style="margin-top:5px;flex-wrap:wrap;gap:4px">' + reqLine(o.req) + equipLine(o.equip) + '</div>' +
         '</div>';
     }).join('');
+    // 一张都接不了时，别让人对着订单板发呆，直接说明该去哪补什么
+    const allLocked = state.board.every((o) => orderBlockers(o).length > 0);
+    box.innerHTML = (allLocked
+      ? '<div class="hint">板上的活都够不上。先去「工位 · 技能」练手，再去「设备」添机器。</div>'
+      : '') + html;
     $('#t-orders').textContent = state.board.length;
   }
 
@@ -4347,6 +4487,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
     }
     // #dev6：车床特写，用于逐件打磨（不影响玩家）
+    // #dev6run：车床常开 + 全景机位，并把运动量写进 title，供无头脚本验证动画在跑
     if (H.indexOf('#dev6') === 0) {
       startGame(1, true);
       state.cash = 200000;
@@ -4354,8 +4495,32 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
       syncEquipMeshes(); renderAll();
       autoSpin = false;
-      camTheta = 1.88; camPhi = 1.20; camRadius = 2.3;
-      camTarget = { x: -3.75, y: 1.02, z: 3.35 };
+      if (H.indexOf('#dev6run') === 0) {
+        camTheta = CAM_WOOD.theta; camPhi = CAM_WOOD.phi; camRadius = CAM_WOOD.r;
+        camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
+        // 调试入口：每 1.3 秒重开一次，p 循环走 0→1，走刀才会真的来回
+        anim.lathe = performance.now() + 1300; anim.latheDur = 1300;
+        setInterval(() => { anim.lathe = performance.now() + 1300; anim.latheDur = 1300; }, 1300);
+        // 无头环境的 rAF 帧数很少，这里手动推进若干帧，让走刀/铁屑真的走完一个来回
+        let dbgN = 0;
+        setInterval(() => {
+          if (dbgN === 0) { anim.lathe = performance.now() + 1300; anim.latheDur = 1300; }
+          if (dbgN++ > 70) return;
+          renderFrame(performance.now());
+        }, 24);
+        setInterval(() => {
+          const lg2 = equipMeshes.lathe;
+          const ud2 = lg2 && lg2.children[0] && lg2.children[0].userData;
+          document.title = (ud2 && ud2.chuck)
+            ? ('LATHE rz=' + ud2.chuck.rotation.z.toFixed(2) + ' sz=' + ud2.saddle.position.z.toFixed(3) +
+               ' peak=' + (ud2.dbgWalkMax || 0).toFixed(3) + ' spin=' + (ud2.spin || 0).toFixed(1) +
+               ' p=' + (ud2.dbgP || 0).toFixed(2))
+            : 'LATHE-MISSING';
+        }, 250);
+      } else {
+        camTheta = 1.88; camPhi = 1.20; camRadius = 2.3;
+        camTarget = { x: -3.75, y: 1.02, z: 3.35 };
+      }
     }
     if (H.indexOf('#dev4') === 0) {
       startGame(1, true);
