@@ -4068,6 +4068,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     s.scale.setScalar(0.45 + Math.random() * 0.75);
   }
 
+  /* 干活聚焦时的临时补光：跟着相机走，只照"正在看的那台设备"。
+     解决的是"聚焦推近之后设备正好落在暗角，只能看出个轮廓"。
+     它随聚焦淡入淡出、不参与全景构图，所以不会破坏整体的明暗关系。
+     ⚠️ 必须懒创建：scene 是在建场景时才 new 的，这里还是模块顶层，
+        直接 scene.add() 会拿到 undefined 并整页白屏（踩过一次）。 */
+  let focusLight = null;
+  let focusLightPin = false;      // 调试入口用来强制点亮补光（复现实战亮度）
+  const _fdir = new T.Vector3();  // 复用的视线方向，避免每帧 new 造成 GC 抖动
+
   function renderFrame(t) {
     const dt = Math.min(0.05, lastT ? Math.max(0.001, t - lastT) : 0.016);
     lastT = t;
@@ -4084,6 +4093,28 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       LT.z + R * Math.sin(camPhi) * Math.cos(camTheta)
     );
     camera.lookAt(LT.x, LT.y, LT.z);
+
+    // 聚焦补光：淡入淡出，位置贴在相机略上方（像操作者身上的头灯）
+    if (scene && !focusLight) {                 // 首次渲染时才建，此时 scene 一定已存在
+      // decay 取 1.6 而不是物理正确的 2：聚焦机位退到 2.7m 后，按平方衰减的光
+      // 落到设备上只剩 1/7，墙面会直接死黑（实测过一版 9.5/2.0 的效果）
+      focusLight = new T.PointLight(0xffe9c9, 0, 10, 1.6);
+      scene.add(focusLight);
+    }
+    const wantFL = (focus || focusLightPin) ? 13 : 0;
+    if (focusLight && Math.abs(focusLight.intensity - wantFL) > 0.02) {
+      focusLight.intensity += (wantFL - focusLight.intensity) * Math.min(1, dt * 5);
+      if (focusLight.intensity < 0) focusLight.intensity = 0;
+    }
+    if (focusLight && focusLight.intensity > 0.02) {
+      // 沿视线前推 0.9m：灯贴着被看的那台设备，而不是留在相机脚边
+      camera.getWorldDirection(_fdir);
+      focusLight.position.set(
+        camera.position.x + _fdir.x * 0.9,
+        camera.position.y + 0.15 + _fdir.y * 0.9,
+        camera.position.z + _fdir.z * 0.9
+      );
+    }
 
     // 设备呼吸光
     const lights = scene.userData.lights;
@@ -4439,7 +4470,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     canvas.addEventListener('pointerdown', (e) => {
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
-      focus = null;                             // 玩家一动手就交出镜头控制权
+      cancelFocus();                            // 玩家一动手就交出镜头控制权
       pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
       lastInteract = performance.now();
       if (pts.size === 2) {
@@ -4484,7 +4515,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     canvas.addEventListener('wheel', (e) => {
       camRadius = clamp(camRadius + e.deltaY * 0.012, 4, 26);
-      focus = null;                             // 滚轮缩放也视作"我要自己看"，立刻停掉聚焦
+      cancelFocus();                            // 滚轮缩放也视作"我要自己看"，立刻停掉聚焦
       lastInteract = performance.now();
       e.preventDefault();
     }, { passive: false });
@@ -4573,12 +4604,36 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const ry = holder.rotation.y || 0;
     const fx = Math.sin(ry), fz = Math.cos(ry);    // 设备正面朝向（模型局部 +z）
     const cl = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
-    const cx = cl(v.x + fx * def.d, -3.55, 3.55);  // 夹进墙内，否则镜头会穿墙看到背面
-    const cy = cl(v.y + def.up, 0.90, 2.60);
-    const cz = cl(v.z + fz * def.d, -4.30, 3.30);
 
+    /* 安全距离：这条是"工作时突然全黑"的根因修复。
+       原来的做法是先按 def.d 算一个机位，再用 clamp 压进房间。
+       但设备贴墙时（车床贴前墙、控制柜贴后墙），压回来的点可能跟目标
+       几乎重合 —— 实测 r 能小到 0.45m，镜头等于贴在设备表面/钻进内部，
+       看到的是一堵内壁，于是整屏全黑；这时旋转只是在原地打转，
+       玩家会觉得"转不动、怎么都恢复不了"。
+       所以：算完必须校验距离，不够就换方向，再不够就放弃聚焦保持原视角。 */
+    const MINR = 2.05;
+    const X0 = -3.55, X1 = 3.55, Z0 = -4.30, Z1 = 3.30, Y0 = 0.90, Y1 = 2.60;
+
+    let cx = cl(v.x + fx * def.d, X0, X1);
+    let cy = cl(v.y + def.up, Y0, Y1);
+    let cz = cl(v.z + fz * def.d, Z0, Z1);
+    let r = Math.hypot(cx - v.x, cy - v.y, cz - v.z);
+
+    if (r < MINR) {
+      // 正前方被墙夹短了：改从"设备指向房间中心"的方向退，这个方向永远开着。
+      // 退得比 MINR 更远一点（2.6），因为这类设备本身是框架/大箱体，
+      // 退到刚好 MINR 会像"钻进机箱里往外看"。
+      const bx = 0 - v.x, bz = 0 - v.z;
+      const L = Math.hypot(bx, bz) || 1;
+      const want = 2.60;
+      cx = cl(v.x + bx / L * want, X0, X1);
+      cy = cl(v.y + 0.60, Y0, Y1);
+      cz = cl(v.z + bz / L * want, Z0, Z1);
+      r = Math.hypot(cx - v.x, cy - v.y, cz - v.z);
+      if (r < MINR) return null;                   // 房间太挤就干脆不聚焦，保持玩家原视角
+    }
     const dx = cx - v.x, dy = cy - v.y, dz = cz - v.z;
-    const r = Math.hypot(dx, dy, dz);
     return {
       theta: Math.atan2(dx, dz),
       phi: Math.acos(Math.min(1, Math.max(-1, dy / r))),
@@ -4624,11 +4679,21 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     while (dth < -Math.PI) dth += Math.PI * 2;
     camTheta = a.theta + dth * u;
     camPhi = a.phi + (b.phi - a.phi) * u;
-    camRadius = a.r + (b.r - a.r) * u;
+    camRadius = Math.max(1.9, a.r + (b.r - a.r) * u);   // 双保险：任何插值都不许贴到脸上
     if (!camTarget) camTarget = { x: 0, y: 1.6, z: 0 };
     camTarget.x = a.t.x + (b.t.x - a.t.x) * u;
     camTarget.y = a.t.y + (b.t.y - a.t.y) * u;
     camTarget.z = a.t.z + (b.t.z - a.t.z) * u;
+  }
+
+  /* 玩家一动手就交出镜头控制权。
+     额外做一件事：聚焦时 camRadius 可能被推到 1.9m 上下，如果就这么交回去，
+     玩家拖拽只是在原地打转、看不到变化，会以为"卡死了"。所以太近就弹回一个
+     能看全局的距离。 */
+  function cancelFocus() {
+    if (!focus) return;
+    focus = null;
+    if (camRadius < 2.6) camRadius = 4.6;
   }
 
   // 让某台设备"动起来"（已实现：台钻、车床、焊机；数控照这个模式扩）
@@ -4645,7 +4710,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (SFX.weld) SFX.weld(d);
     }
     else if (id === 'scope') {
+      // 原来只赋了 Dur、没赋结束时刻 → anim.scope 永远是 0，示波器从来不会画波形
       anim.scopeDur = ms || 1600;
+      anim.scope = performance.now() + (ms || 1600);
     }
     else if (id === 'cnc') {
       // 数控一刀要走好一会儿：太短的动画看不出"在加工"，只是闪了一下
@@ -5520,6 +5587,60 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     //   #dev8home      玩家默认全景（显式写法）
     //   #dev8cnc / #dev8scope / #dev8cab / #dev8cad  单品特写（直接用自动聚焦的机位，
     //                  这样截图验证的就是玩家干活时真正会看到的画面）
+    // #devfdump：逐台设备打印自动聚焦机位，专门用来查"镜头贴到设备脸上导致全黑"。
+    //   同时输出**修复前**的算法（旧 clamp 直接夹进房间）算出的距离，便于确认回归点。
+    if (H.indexOf('#devfdump') === 0) {
+      startGame(1, true);
+      EQUIP_DEF.forEach((e) => (state.equip[e.id] = true));
+      SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
+      syncEquipMeshes(); renderAll();
+      const rows = Object.keys(FOCUS_DEF).map((k) => {
+        const def = FOCUS_DEF[k];
+        const holder = (k === 'cab' || k === 'cad') ? stations[k] : equipMeshes[k];
+        if (!def || !holder) return k + ':MISSING';
+        holder.updateMatrixWorld(true);
+        const v = new T.Vector3(def.a[0], def.a[1], def.a[2]);
+        holder.localToWorld(v);
+        const ry = holder.rotation.y || 0;
+        const oldCx = Math.min(3.55, Math.max(-3.55, v.x + Math.sin(ry) * def.d));
+        const oldCz = Math.min(3.30, Math.max(-4.30, v.z + Math.cos(ry) * def.d));
+        const oldR = Math.hypot(oldCx - v.x, def.up, oldCz - v.z);
+        const p = focusPreset(k);
+        return k + ' oldR=' + oldR.toFixed(2) + ' newR=' + (p ? p.r.toFixed(2) : 'NULL');
+      });
+      const d9 = document.createElement('div');
+      d9.id = 'fdump';
+      // 标记拆开拼，避免这串字面量出现在 DOM 的 <script> 源码里、被 dump-dom 抢先匹配
+      d9.textContent = 'FDU' + 'MP ' + rows.join(' | ');
+      document.body.appendChild(d9);
+    }
+    // #devf<id>：直接用"干活自动聚焦"的机位看任意一台设备（lathe/drill/welder/printer/...）
+    //   专门用来验证"聚焦后玩家到底看不看得见"，这是"全黑"事故的回归测试入口
+    if (H.indexOf('#devf') === 0 && H.indexOf('#devfdump') !== 0) {
+      startGame(1, true);
+      state.cash = 200000;
+      EQUIP_DEF.forEach((e) => (state.equip[e.id] = true));
+      SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
+      syncEquipMeshes(); renderAll();
+      autoSpin = false;
+      camTheta = CAM_WOOD.theta; camPhi = CAM_WOOD.phi; camRadius = CAM_WOOD.r;
+      camTarget = { x: CAM_WOOD.t.x, y: CAM_WOOD.t.y, z: CAM_WOOD.t.z };
+      const solo = ['lathe', 'drill', 'welder', 'printer', 'scope', 'cnc', 'cab', 'cad']
+        .filter((k) => H.indexOf('#devf' + k) === 0)[0];
+      if (solo) {
+        const p = focusPreset(solo);
+        if (p) { camTheta = p.theta; camPhi = p.phi; camRadius = p.r; camTarget = p.t; }
+        focusLightPin = true;          // 截图要复现"干活聚焦"时的真实亮度
+        const n = performance.now();
+        anim.drill = n + 600000; anim.drillDur = 600000;
+        anim.lathe = n + 600000; anim.latheDur = 600000;
+        anim.weld = n + 600000; anim.weldDur = 600000;
+        anim.scope = n + 600000; anim.scopeDur = 600000;
+        anim.cnc = n + 600000; anim.cncDur = 600000;
+        anim.cab = n + 600000; anim.cabDur = 600000;
+        anim.cad = n + 600000; anim.cadDur = 600000;
+      }
+    }
     if (H.indexOf('#dev8') === 0) {
       startGame(1, true);
       state.cash = 200000;
