@@ -563,6 +563,14 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       const n = 5, gap = Math.max(150, (ms || 1500) / n);
       for (let i = 0; i < n; i++) setTimeout(() => this.noise(0.10, 0.026, 3400), i * gap);
     },
+    // 焊机：电弧"嘶——"的高频底噪 + 不规则的爆点（跟钻/车完全不同的声音质感）
+    weld(ms) {
+      if (!this.ready || !settings.sfx) return;
+      this.noise(0.34, 0.030, 5200);                     // 电弧底噪
+      this.tone(128, 0.32, 'sawtooth', 0.020, 118);      // 变压器低鸣
+      const n = 7, gap = Math.max(110, (ms || 1500) / n);
+      for (let i = 0; i < n; i++) setTimeout(() => this.noise(0.055, 0.019, 6800), i * gap);
+    },
     ambient(on) {
       if (!this.ready) return;
       if (on && !this.amb) {
@@ -643,7 +651,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   let camTheta = -0.16, camPhi = 0.94, camRadius = 17.5;
   let autoSpin = true, lastInteract = 0;
   let equipMeshes = {};
-  let anim = { drill: 0, drillDur: 1600, lathe: 0, latheDur: 1500 };
+  let anim = { drill: 0, drillDur: 1600, lathe: 0, latheDur: 1500, weld: 0, weldDur: 1500 };
   let lastT = 0;
   let camTarget = null;   // 开发用：把镜头钉在某台设备上
   let qualityLevel = 2;
@@ -1375,20 +1383,75 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     g.add(box(1.5, 1.3, 1.0, MAT.steelDark, 0, 0.65, 0));
     g.add(box(1.44, 0.28, 0.94, MAT.paint, 0, 1.28, 0));
     g.add(box(0.5, 0.28, 0.06, MAT.black, -0.34, 1.0, 0.52));
-    g.add(box(0.18, 0.06, 0.02, MAT.gn, -0.34, 1.0, 0.56));
     g.add(box(0.08, 0.08, 0.02, MAT.mg, 0.16, 1.05, 0.56));
     g.add(cyl(0.1, 0.1, 0.14, MAT.black, 0.52, 0.85, 0.5));
-    // 焊枪电缆
+    /* ---------- 焊接小台 + 工件（弧光的落点，否则电弧悬在半空很假）----------
+       放在机身左前侧：+x 方向背后贴墙、从房间内看会被机箱挡住，看不到弧光 */
+    const WX = -1.05, WZ = 0.45;         // 焊接台中心（模型局部坐标）
+    g.add(box(0.44, 0.045, 0.36, MAT.steelDark, WX, 0.31, WZ));            // 台面
+    [[-0.19, -0.15], [0.19, -0.15], [-0.19, 0.15], [0.19, 0.15]].forEach(([a, b]) => {
+      g.add(box(0.035, 0.31, 0.035, MAT.steelDark, WX + a, 0.155, WZ + b)); // 四条腿
+    });
+    g.add(box(0.40, 0.02, 0.32, MAT.steelDark, WX, 0.115, WZ));            // 下横撑
+    // 工件：横板 + 立板，交界处就是焊缝
+    g.add(box(0.26, 0.040, 0.09, MAT.steel, WX - 0.04, 0.3525, WZ));
+    g.add(box(0.04, 0.16, 0.09, MAT.steel, WX + 0.05, 0.4525, WZ));
+
+    /* ---------- 焊枪（可摆动：枪口是 torchG 的局部原点）---------- */
+    const torchG = new T.Group();
+    torchG.position.set(WX + 0.03, 0.40, WZ);
+    torchG.add(cyl(0.028, 0.021, 0.09, new T.MeshStandardMaterial({
+      color: 0xc9c2ae, roughness: 0.62, metalness: 0.05
+    }), 0, 0.045, 0, 16));                                                 // 陶瓷喷嘴
+    torchG.add(cyl(0.020, 0.020, 0.05, MAT.brass, 0, 0.115, 0, 12));       // 铜接头
+    torchG.add(cyl(0.019, 0.019, 0.15, MAT.steel, 0, 0.21, 0, 12));        // 枪管
+    const grip = box(0.048, 0.13, 0.048, MAT.black, -0.008, 0.20, 0.055);  // 手柄
+    grip.rotation.x = -0.26; torchG.add(grip);
+    torchG.add(cyl(0.015, 0.015, 0.055, MAT.black, 0, 0.285, -0.015, 10)); // 尾部电缆接头
+    torchG.rotation.z = -0.12;
+    g.add(torchG);
+
+    /* ---------- 电缆：机身接口 → 枪尾 ---------- */
     const curve = new T.CatmullRomCurve3([
-      new T.Vector3(0.5, 0.85, 0.5), new T.Vector3(1.1, 0.5, 0.9),
-      new T.Vector3(1.5, 0.12, 0.6), new T.Vector3(1.2, 0.06, -0.2)
+      new T.Vector3(0.45, 0.85, 0.52), new T.Vector3(-0.18, 0.56, 0.82),
+      new T.Vector3(-0.78, 0.34, 0.68), new T.Vector3(-1.02, 0.66, 0.44)
     ]);
-    const tube = new T.Mesh(new T.TubeGeometry(curve, 22, 0.045, 8, false), MAT.black);
+    const tube = new T.Mesh(new T.TubeGeometry(curve, 26, 0.030, 8, false), MAT.black);
     tube.castShadow = true;
     g.add(tube);
-    const torch = cyl(0.03, 0.07, 0.5, MAT.steel, 1.2, 0.3, -0.2);
-    torch.rotation.z = 0.5;
-    g.add(torch);
+
+    /* ---------- 弧光：一个小发光球 + 真正的点光源（会照亮工件和台面）---------- */
+    const arc = new T.Mesh(new T.SphereGeometry(0.042, 12, 10),
+      new T.MeshBasicMaterial({ color: 0xeaf4ff }));
+    arc.position.set(WX + 0.03, 0.378, WZ);
+    arc.visible = false;
+    g.add(arc);
+    const arcLight = new T.PointLight(0xc4dcff, 0, 2.6, 2);
+    arcLight.position.copy(arc.position);
+    g.add(arcLight);
+
+    /* ---------- 火花粒子 ---------- */
+    const sparks = [];
+    const sparkMat = new T.MeshBasicMaterial({ color: 0xffdf92 });
+    for (let i = 0; i < 18; i++) {
+      const s = new T.Mesh(new T.BoxGeometry(0.013, 0.013, 0.013), sparkMat);
+      s.visible = false;
+      s.userData = { v: new T.Vector3(), life: 0 };
+      g.add(s);
+      sparks.push(s);
+    }
+
+    /* ---------- 面板指示灯：单独一份材质，才好单独调亮度 ---------- */
+    const glowMat = new T.MeshStandardMaterial({ color: 0x001408, emissive: 0x39ff88, emissiveIntensity: 0.6 });
+    const glow = box(0.18, 0.06, 0.02, glowMat, -0.34, 1.0, 0.56);
+    g.add(glow);
+
+    g.userData.arc = arc;
+    g.userData.arcLight = arcLight;
+    g.userData.torch = torchG;
+    g.userData.torchZ = WZ;
+    g.userData.sparks = sparks;
+    g.userData.glowMat = glowMat;
     return g;
   }
 
@@ -3364,6 +3427,19 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     c.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
   }
 
+  function spawnWeldSpark(ud) {
+    const s = ud.sparks.find((x) => x.userData.life <= 0);
+    if (!s) return;
+    s.visible = true;
+    s.position.copy(ud.arc.position);
+    // 电弧把熔化的铁水甩出去：以斜上方为主，方向随机散开
+    const a = Math.random() * Math.PI * 2;
+    const sp = 0.30 + Math.random() * 0.85;
+    s.userData.v.set(Math.cos(a) * sp, 0.55 + Math.random() * 1.15, Math.sin(a) * sp);
+    s.userData.life = 0.28 + Math.random() * 0.42;
+    s.scale.setScalar(0.55 + Math.random() * 0.9);
+  }
+
   function renderFrame(t) {
     const dt = Math.min(0.05, lastT ? Math.max(0.001, t - lastT) : 0.016);
     lastT = t;
@@ -3477,6 +3553,50 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
             c.userData.v.x *= 0.40; c.userData.v.z *= 0.40;
           }
           if (c.userData.life <= 0) c.visible = false;
+        });
+      }
+    }
+
+    // ---- 焊机：电弧闪烁 + 焊枪摆动 + 火花飞溅 ----
+    const wg = equipMeshes.welder;
+    if (wg && wg.children[0]) {
+      const ud = wg.children[0].userData;
+      if (ud && ud.arc && ud.sparks) {
+        const now = performance.now();
+        const on = anim.weld > now;
+        const p = on ? clamp(1 - (anim.weld - now) / anim.weldDur, 0, 1) : 0;
+
+        // 电弧亮度：真实焊接电流本身就不稳，用两个不同频率的正弦相乘做出不规则闪烁，
+        // 再加一点随机 —— 恒定亮度的弧光一眼就是贴图，不是电
+        const flick = on
+          ? 0.60 + 0.40 * Math.abs(Math.sin(now * 0.041) * Math.sin(now * 0.0173)) + (Math.random() - 0.5) * 0.12
+          : 0;
+        ud.dbgFlick = flick;                 // 调试入口读用
+        ud.arc.visible = on && flick > 0.22;
+        ud.arc.scale.setScalar(0.68 + flick * 0.85);
+        ud.arcLight.intensity = on ? 2.0 + flick * 16.0 : 0;
+        ud.glowMat.emissiveIntensity = on ? 3.2 : 0.6;
+
+        // 焊枪：沿焊缝来回摆（焊工的手不会完全静止），停工时回中位
+        const sway = on ? Math.sin(p * Math.PI * 7) : 0;
+        ud.dbgSway = Math.max(ud.dbgSway || 0, Math.abs(sway));
+        ud.torch.position.z = ud.torchZ + sway * 0.024;
+        ud.torch.rotation.x = sway * 0.055;
+        ud.torch.rotation.z = -0.12 + Math.sin(now * 0.0021) * 0.010;
+
+        // 火花：密度跟亮度走，弧光亮的时候甩得更多
+        ud.sparkT = (ud.sparkT || 0) + dt;
+        if (on && ud.sparkT > 0.030) { ud.sparkT = 0; if (flick > 0.45) spawnWeldSpark(ud); }
+        ud.sparks.forEach((s) => {
+          if (s.userData.life <= 0) return;
+          s.userData.life -= dt;
+          s.userData.v.y -= 7.4 * dt;
+          s.position.addScaledVector(s.userData.v, dt);
+          s.rotation.x += dt * 12; s.rotation.z += dt * 9;
+          if (s.position.y < 0.34) {               // 落到台面/工件上就熄了
+            s.userData.life = 0;
+          }
+          if (s.userData.life <= 0) s.visible = false;
         });
       }
     }
@@ -3680,12 +3800,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     setTimeout(() => el.remove(), 2400);
   }
 
-  // 让某台设备"动起来"（已实现：台钻、车床；焊机/数控照这个模式扩）
+  // 让某台设备"动起来"（已实现：台钻、车床、焊机；数控照这个模式扩）
   function animEquip(id, ms) {
     if (!state || !state.equip[id] || !equipMeshes[id]) return false;
     anim[id] = performance.now() + (ms || 1600);
     if (id === 'drill') { anim.drillDur = ms || 1600; if (SFX.drill) SFX.drill(ms || 1600); }
-    if (id === 'lathe') { anim.latheDur = ms || 1500; if (SFX.lathe) SFX.lathe(ms || 1500); }
+    else if (id === 'lathe') { anim.latheDur = ms || 1500; if (SFX.lathe) SFX.lathe(ms || 1500); }
+    else if (id === 'welder') { anim.weldDur = ms || 1500; if (SFX.weld) SFX.weld(ms || 1500); }
     lastInteract = performance.now();
     return true;
   }
@@ -4521,6 +4642,35 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         camTheta = 1.88; camPhi = 1.20; camRadius = 2.3;
         camTarget = { x: -3.75, y: 1.02, z: 3.35 };
       }
+    }
+    // #dev7run：焊机常开 + 固定机位，把电弧亮度/焊枪摆幅写进 title 供无头脚本验证
+    if (H.indexOf('#dev7') === 0) {
+      startGame(1, true);
+      state.cash = 200000;
+      EQUIP_DEF.forEach((e) => (state.equip[e.id] = true));
+      SKILL_DEF.forEach((s) => (state.skills[s.id] = 5));
+      syncEquipMeshes(); renderAll();
+      autoSpin = false;
+      camTheta = -1.31; camPhi = 1.146; camRadius = 3.00;
+      camTarget = { x: 2.50, y: 0.55, z: -1.20 };
+      anim.weld = performance.now() + 600000; anim.weldDur = 600000;
+      // 无头环境 rAF 帧数极少，手动推帧让火花真的飞出来
+      let wN = 0;
+      setInterval(() => {
+        if (wN++ > 70) return;
+        anim.weld = performance.now() + 600000;
+        renderFrame(performance.now());
+      }, 24);
+      setInterval(() => {
+        const wg2 = equipMeshes.welder;
+        const ud3 = wg2 && wg2.children[0] && wg2.children[0].userData;
+        document.title = (ud3 && ud3.arc)
+          ? ('WELD arc=' + (ud3.arc.visible ? 1 : 0) + ' li=' + ud3.arcLight.intensity.toFixed(1) +
+             ' flick=' + (ud3.dbgFlick || 0).toFixed(2) + ' sway=' + (ud3.dbgSway || 0).toFixed(3) +
+             ' spark=' + ud3.sparks.filter((s) => s.userData.life > 0).length +
+             ' glow=' + ud3.glowMat.emissiveIntensity.toFixed(1))
+          : 'WELD-MISSING';
+      }, 250);
     }
     if (H.indexOf('#dev4') === 0) {
       startGame(1, true);
